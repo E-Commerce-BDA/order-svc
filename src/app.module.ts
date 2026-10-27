@@ -9,6 +9,7 @@ import { CheckoutModule } from './checkout/checkout.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
 import { OutboxModule } from './outbox/outbox.module.js';
+import { InternalModule } from './internal/internal.module.js';
 import Joi from 'joi';
 
 @Module({
@@ -34,6 +35,7 @@ import Joi from 'joi';
     OrdersModule,
     PaymentsModule,
     OutboxModule,
+    InternalModule,
   ],
   controllers: [],
   providers: [],
