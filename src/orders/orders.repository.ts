@@ -68,6 +68,12 @@ export class OrdersRepository {
    * Loads an order by its ID with complete relation snapshot.
    */
   async findOrderById(orderId: string): Promise<OrderWithDetails | null> {
+    const UUID_REGEX =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!UUID_REGEX.test(orderId)) {
+      return null;
+    }
+
     const pool = getPool();
     const res = await pool.query<OrderWithDetails>(
       `SELECT o.*,
@@ -95,6 +101,12 @@ export class OrdersRepository {
    * Loads the status history timeline for a given order.
    */
   async findStatusHistory(orderId: string): Promise<OrderStatusHistoryRow[]> {
+    const UUID_REGEX =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!UUID_REGEX.test(orderId)) {
+      return [];
+    }
+
     const pool = getPool();
     const res = await pool.query<OrderStatusHistoryRow>(
       `SELECT * FROM "order".order_status_history
