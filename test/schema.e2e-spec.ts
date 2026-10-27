@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { getPool, closePool } from '../src/db/pool.js';
 import type {
@@ -196,14 +197,13 @@ describe('Order Schema & Fixtures (e2e)', () => {
   });
 
   it('supports transactional outbox insertion with pending status', async () => {
-    const eventId = '018f0000-0000-7000-8000-000000000099';
+    const eventId = randomUUID();
     const orderId = '018f0000-0000-7000-8000-000000000010';
 
     await pool.query(
       `INSERT INTO "order".outbox (
         event_id, aggregate_type, aggregate_id, event_type, payload
-      ) VALUES ($1, 'order', $2, 'order.created', '{"test": true}')
-      ON CONFLICT (event_id) DO NOTHING;`,
+      ) VALUES ($1, 'order', $2, 'order.created', '{"test": true}');`,
       [eventId, orderId],
     );
 
