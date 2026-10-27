@@ -1,6 +1,8 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module.js';
 import { ValidationPipe } from '@nestjs/common';
+import { HttpExceptionFilter } from './common/filters/http-exception.filter.js';
+import { CacheControlInterceptor } from './common/interceptors/cache-control.interceptor.js';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -9,6 +11,9 @@ async function bootstrap() {
   app.setGlobalPrefix('/api/v1', {
     exclude: ['health', 'health/ready'],
   });
+
+  app.useGlobalFilters(new HttpExceptionFilter());
+  app.useGlobalInterceptors(new CacheControlInterceptor());
 
   app.useGlobalPipes(
     new ValidationPipe({
