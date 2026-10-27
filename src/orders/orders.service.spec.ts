@@ -3,11 +3,9 @@ import { BadRequestException, ForbiddenException, NotFoundException } from '@nes
 import { OrdersService } from './orders.service.js';
 import { OrdersRepository, type OrderWithDetails } from './orders.repository.js';
 import {
-  ALLOWED_STATUS_TRANSITIONS,
   assertValidTransition,
   canTransition,
 } from './order-state-machine.js';
-import type { OrderRow, OrderStatusHistoryRow } from '../db/rows.js';
 
 describe('Order State Machine', () => {
   it('allows valid progressive transitions', () => {
