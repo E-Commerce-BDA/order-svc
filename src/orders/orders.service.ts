@@ -16,7 +16,7 @@ import type { RefundOrderDto } from './dto/refund-order.dto.js';
 
 export interface UserContext {
   userId: string;
-  role: string;
+  roles: string[];
 }
 
 @Injectable()
@@ -49,7 +49,8 @@ export class OrdersService {
       throw new NotFoundException(`Order ${orderId} not found`);
     }
 
-    if (currentUser.role !== 'admin' && order.user_id !== currentUser.userId) {
+    const isAdmin = currentUser.roles?.includes('admin');
+    if (!isAdmin && order.user_id !== currentUser.userId) {
       throw new ForbiddenException('You do not have access to this order');
     }
 
