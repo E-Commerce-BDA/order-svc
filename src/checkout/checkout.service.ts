@@ -1,14 +1,16 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ConflictException,
   Injectable,
   Logger,
+  ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { getPool } from '../db/pool.js';
 import { RedisService } from '../redis/redis.service.js';
-import { CatalogClient } from '../clients/catalog.client.js';
+import { CatalogClient, type ReserveStockResult } from '../clients/catalog.client.js';
 import { CartClient } from '../clients/cart.client.js';
 import { DiscountsService } from '../discounts/discounts.service.js';
 import { DiscountsRepository } from '../discounts/discounts.repository.js';
@@ -101,30 +103,30 @@ export class CheckoutService {
     const reservationId = randomUUID();
 
     try {
-      // 3. Stock Reservation in catalog-svc
+      // 3. Stock Reservation in catalog-svc — the reservationId is generated
+      // locally and is the idempotency key, so a retried checkout cannot
+      // decrement stock twice.
       const reservation = await this.catalogClient.reserveStock(
         reservationId,
         dto.items.map((i) => ({
           productId: i.productId,
-          variantId: i.variantId,
-          qty: i.qty,
+          variantId: i.variantId ?? null,
+          quantity: i.qty,
         })),
       );
 
-      if (!reservation.success) {
+      if (!reservation.ok) {
         await this.redisService.del(idemLockKey);
-        throw new ConflictException(
-          reservation.errorMessage ?? 'STOCK_INSUFFICIENT: One or more items are out of stock',
-        );
+        throw this.toStockError(reservation);
       }
 
       // 4. Hydrate Snapshots & Compute Line Totals
       const snapshots = await this.catalogClient.getProductSnapshots(
-        dto.items.map((i) => i.productId),
+        dto.items.map((i) => i.variantId ?? i.productId),
       );
 
       const itemsWithSnapshots: CheckoutItemResponse[] = dto.items.map((item) => {
-        const snap = snapshots.get(item.productId);
+        const snap = snapshots.get(item.variantId ?? item.productId);
         const productName = snap?.productName ?? `Product ${item.productId.slice(0, 8)}`;
         const sku = snap?.sku ?? `SKU-${item.productId.slice(0, 8)}`;
         const unitPrice = snap
@@ -156,7 +158,7 @@ export class CheckoutService {
         );
 
         if (!valRes.valid) {
-          await this.catalogClient.releaseStock(reservationId, dto.items);
+          await this.catalogClient.releaseStock(reservationId);
           await this.redisService.del(idemLockKey);
           throw new UnprocessableEntityException(
             valRes.message ?? 'COUPON_INVALID: Discount code is invalid or expired',
@@ -182,7 +184,7 @@ export class CheckoutService {
       );
 
       if (!paymentRes.success) {
-        await this.catalogClient.releaseStock(reservationId, dto.items);
+        await this.catalogClient.releaseStock(reservationId);
         await this.redisService.del(idemLockKey);
         throw new BadRequestException(
           `PAYMENT_FAILED: ${paymentRes.errorMessage ?? 'Payment authorization failed'}`,
@@ -201,8 +203,9 @@ export class CheckoutService {
         const orderInsert = await client.query<OrderRow>(
           `INSERT INTO "order".orders (
             user_id, order_number, status, subtotal, shipping_fee, tax, discount, grand_total,
-            currency, payment_status, shipping_address, billing_address, discount_code_id, notes
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            currency, payment_status, shipping_address, billing_address, discount_code_id,
+            stock_reservation_id, notes
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
           RETURNING id;`,
           [
             userId,
@@ -218,6 +221,7 @@ export class CheckoutService {
             JSON.stringify(dto.shippingAddress),
             JSON.stringify(dto.billingAddress),
             couponId ?? null,
+            reservationId,
             dto.notes ?? null,
           ],
         );
@@ -278,6 +282,7 @@ export class CheckoutService {
           userId,
           grandTotal,
           itemsCount: itemsWithSnapshots.length,
+          reservationId,
           createdAt: new Date().toISOString(),
         };
 
@@ -297,7 +302,7 @@ export class CheckoutService {
         await client.query('COMMIT');
       } catch (txError) {
         await client.query('ROLLBACK');
-        await this.catalogClient.releaseStock(reservationId, dto.items);
+        await this.catalogClient.releaseStock(reservationId);
         await this.redisService.del(idemLockKey);
         throw txError;
       } finally {
@@ -333,6 +338,30 @@ export class CheckoutService {
     } catch (err) {
       await this.redisService.del(idemLockKey).catch(() => {});
       throw err;
+    }
+  }
+
+  /**
+   * A stock failure is not always a 409: a contract drift must surface as a bad
+   * gateway (our client is wrong) and a dead catalog as unavailable, so the
+   * storefront can retry instead of telling the customer the item is gone.
+   */
+  private toStockError(
+    failure: Extract<ReserveStockResult, { ok: false }>,
+  ): ConflictException | BadGatewayException | ServiceUnavailableException {
+    switch (failure.failure) {
+      case 'insufficient_stock':
+        return new ConflictException(
+          `${failure.code ?? 'STOCK_INSUFFICIENT'}: ${failure.message}`,
+        );
+      case 'invalid_request':
+        return new BadGatewayException(
+          `CATALOG_CONTRACT_ERROR: ${failure.message}`,
+        );
+      default:
+        return new ServiceUnavailableException(
+          `CATALOG_UNAVAILABLE: ${failure.message}`,
+        );
     }
   }
 }
