@@ -12,7 +12,7 @@ import {
 } from '../src/auth/auth.constants.js';
 import { closePool, getPool } from '../src/db/pool.js';
 import { OutboxService } from '../src/outbox/outbox.service.js';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { OrderRow } from '../src/db/rows.js';
@@ -37,16 +37,15 @@ describe('Orders Lifecycle & State Machine (e2e)', () => {
 
   beforeAll(async () => {
     const pool = getPool();
-    const schemaSql = readFileSync(
-      join(__dirname, '../db/001-order-schema.sql'),
-      'utf-8',
-    );
-    await pool.query(schemaSql);
-    const seedSql = readFileSync(
-      join(__dirname, '../db/002-seed-orders.sql'),
-      'utf-8',
-    );
-    await pool.query(seedSql);
+    // Apply every migration in filename order, so a new db/NNN file is picked up
+    // without editing this bootstrap.
+    const dbDir = join(__dirname, '../db');
+    const migrations = readdirSync(dbDir)
+      .filter((file) => file.endsWith('.sql'))
+      .sort();
+    for (const migration of migrations) {
+      await pool.query(readFileSync(join(dbDir, migration), 'utf-8'));
+    }
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
