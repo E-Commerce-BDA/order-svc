@@ -5,13 +5,12 @@ import { CheckoutRepository } from './checkout.repository.js';
 import { RedisModule } from '../redis/redis.module.js';
 import { PaymentsModule } from '../payments/payments.module.js';
 import { DiscountsModule } from '../discounts/discounts.module.js';
-import { CatalogClient } from '../clients/catalog.client.js';
-import { CartClient } from '../clients/cart.client.js';
+import { ClientsModule } from '../clients/clients.module.js';
 
 @Module({
-  imports: [RedisModule, PaymentsModule, DiscountsModule],
+  imports: [RedisModule, PaymentsModule, DiscountsModule, ClientsModule],
   controllers: [CheckoutController],
-  providers: [CheckoutService, CheckoutRepository, CatalogClient, CartClient],
-  exports: [CheckoutService, CatalogClient, CartClient],
+  providers: [CheckoutService, CheckoutRepository],
+  exports: [CheckoutService],
 })
 export class CheckoutModule {}
