@@ -11,8 +11,11 @@ import {
   JWT_ISSUER,
 } from './../src/auth/auth.constants.js';
 import { closePool, getPool } from './../src/db/pool.js';
-import { CatalogClient } from './../src/clients/catalog.client.js';
-import { readFileSync } from 'node:fs';
+import {
+  CatalogClient,
+  type ProductSnapshot,
+} from './../src/clients/catalog.client.js';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { OrderRow, OrderItemRow, OutboxRow, PaymentRow } from '../src/db/rows.js';
@@ -34,41 +37,94 @@ describe('Checkout (e2e)', () => {
 
   const userId = '018f0000-0000-7000-8000-000000000001';
   const productId = '018f0000-0000-7000-8000-000000000101';
+  const variantId = '018f0000-0000-7000-8000-000000000201';
+  const UUID_RE =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  const productSnapshot: ProductSnapshot = {
+    productId,
+    variantId: null,
+    productName: 'Running Shoe Pro',
+    sku: 'RSP-BLK-42',
+    unitPrice: 80.0,
+    effectivePrice: 80.0,
+    available: true,
+    stock: 25,
+  };
+
+  const variantSnapshot: ProductSnapshot = {
+    productId,
+    variantId,
+    productName: 'Running Shoe Pro',
+    sku: 'RSP-BLK-44',
+    unitPrice: 95.0,
+    effectivePrice: 95.0,
+    available: true,
+    stock: 7,
+  };
+
+  /**
+   * Contract-faithful fake. It fails the suite if order-svc ever sends `qty`
+   * again, drops the caller-supplied reservation id, or reads a snapshot under
+   * the wrong key — a looser mock is what hid the 400-on-every-checkout bug.
+   */
+  const createCatalogFake = () => ({
+    reserveStock: vi.fn(
+      async (
+        reservationId: string,
+        items: Array<{
+          productId: string;
+          variantId?: string | null;
+          quantity: number;
+        }>,
+      ) => {
+        expect(reservationId).toMatch(UUID_RE);
+        expect(items.length).toBeGreaterThan(0);
+        for (const item of items) {
+          expect(item).toHaveProperty('quantity');
+          expect(item).not.toHaveProperty('qty');
+        }
+        return {
+          ok: true,
+          reservationId,
+          status: 'held' as const,
+          expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          items: items.map((item) => ({
+            productId: item.productId,
+            variantId: item.variantId ?? null,
+            quantity: item.quantity,
+            remainingStock: 5,
+          })),
+        };
+      },
+    ),
+    releaseStock: vi.fn(async (reservationId: string) => {
+      expect(reservationId).toMatch(UUID_RE);
+      return { ok: true, status: 'released' };
+    }),
+    getProductSnapshots: vi.fn(async (ids: string[]) => {
+      const map = new Map<string, ProductSnapshot>();
+      for (const id of ids) {
+        if (id === variantId) map.set(variantId, variantSnapshot);
+        else if (id === productId) map.set(productId, productSnapshot);
+      }
+      return map;
+    }),
+  });
 
   beforeAll(async () => {
-    // Ensure DB schema & seed exist
+    // Apply every migration in filename order so 003+ is picked up
+    // automatically instead of being hardcoded here.
     const pool = getPool();
-    const schemaSql = readFileSync(
-      join(__dirname, '../db/001-order-schema.sql'),
-      'utf-8',
-    );
-    await pool.query(schemaSql);
-    const seedSql = readFileSync(
-      join(__dirname, '../db/002-seed-orders.sql'),
-      'utf-8',
-    );
-    await pool.query(seedSql);
+    const dbDir = join(__dirname, '../db');
+    const migrations = readdirSync(dbDir)
+      .filter((file) => file.endsWith('.sql'))
+      .sort();
+    for (const migration of migrations) {
+      await pool.query(readFileSync(join(dbDir, migration), 'utf-8'));
+    }
 
-    mockCatalogClient = {
-      reserveStock: vi.fn().mockResolvedValue({ success: true, reservedItems: 2 }),
-      releaseStock: vi.fn().mockResolvedValue({ success: true, releasedCount: 2 }),
-      getProductSnapshots: vi.fn().mockResolvedValue(
-        new Map([
-          [
-            productId,
-            {
-              productId,
-              productName: 'Running Shoe Pro',
-              sku: 'RSP-BLK-42',
-              unitPrice: 80.0,
-              effectivePrice: 80.0,
-              available: true,
-              stock: 25,
-            },
-          ],
-        ]),
-      ),
-    };
+    mockCatalogClient = createCatalogFake();
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -220,6 +276,61 @@ describe('Checkout (e2e)', () => {
     expect(outboxRows.length).toBe(1);
     expect(outboxRows[0].event_type).toBe('order.created');
     expect(outboxRows[0].status).toBe('pending');
+
+    // The hold that was taken for this checkout is persisted on the order, so a
+    // later commit (cat-009) or cancellation can find it without guessing.
+    const reservationId = mockCatalogClient.reserveStock.mock.calls[0][0] as string;
+    expect(orderRows[0].stock_reservation_id).toBe(reservationId);
+    expect(outboxRows[0].payload.reservationId).toBe(reservationId);
+
+    // Snapshots are requested by `variantId ?? productId`.
+    expect(mockCatalogClient.getProductSnapshots).toHaveBeenCalledWith([productId]);
+  });
+
+  it('prices a variant line from its own snapshot and stores the variant id', async () => {
+    const key = `idem-variant-${randomUUID()}`;
+
+    const res = await request(app.getHttpServer())
+      .post('/api/v1/checkout')
+      .set('Authorization', `Bearer ${customerToken}`)
+      .set('x-idempotency-key', key)
+      .send({
+        ...sampleCheckoutPayload(),
+        items: [{ productId, variantId, qty: 1 }],
+        discountCode: undefined,
+      })
+      .expect(201);
+
+    // Variant price (95), no discount, shipping applies below the 100 threshold.
+    expect(res.body.totals.subtotal).toBe(95);
+    expect(res.body.totals.grandTotal).toBe(100);
+    expect(mockCatalogClient.getProductSnapshots).toHaveBeenCalledWith([variantId]);
+
+    const { rows } = await getPool().query<OrderItemRow>(
+      `SELECT * FROM "order".order_items WHERE order_id = $1;`,
+      [res.body.orderId],
+    );
+    expect(rows[0].variant_id).toBe(variantId);
+    expect(rows[0].sku).toBe('RSP-BLK-44');
+    expect(parseFloat(rows[0].unit_price)).toBe(95);
+  });
+
+  it('surfaces a catalog 409 as a checkout 409 with the stock failure code', async () => {
+    mockCatalogClient.reserveStock.mockResolvedValueOnce({
+      ok: false,
+      failure: 'insufficient_stock',
+      code: 'INSUFFICIENT_STOCK',
+      message: 'Insufficient stock for product 018f0000-…',
+    });
+
+    const res = await request(app.getHttpServer())
+      .post('/api/v1/checkout')
+      .set('Authorization', `Bearer ${customerToken}`)
+      .set('x-idempotency-key', `idem-stock-${randomUUID()}`)
+      .send(sampleCheckoutPayload())
+      .expect(409);
+
+    expect(res.body.message).toContain('INSUFFICIENT_STOCK');
   });
 
   it('replays identical response instantly when resubmitting with same idempotency key', async () => {
@@ -302,3 +413,27 @@ describe('Checkout (e2e)', () => {
     expect(mockCatalogClient.releaseStock).toHaveBeenCalled();
   });
 });
+
+const liveCatalogUrl = process.env.CATALOG_SVC_URL;
+const liveProductId = process.env.CATALOG_TEST_PRODUCT_ID;
+
+describe.skipIf(!liveCatalogUrl || !liveProductId)(
+  'Checkout client against a live catalog-svc',
+  () => {
+    it('reads a real snapshot, including a real sku', async () => {
+      const client = new CatalogClient({
+        get: (key: string) =>
+          key === 'CATALOG_SVC_URL'
+            ? liveCatalogUrl
+            : process.env.INTERNAL_SERVICE_KEY,
+      } as unknown as ConfigService);
+
+      const snapshots = await client.getProductSnapshots([liveProductId!]);
+      const snapshot = snapshots.get(liveProductId!);
+
+      expect(snapshot).toBeDefined();
+      expect(snapshot!.sku).toBeTruthy();
+      expect(snapshot!.available).toBe(true);
+    });
+  },
+);
