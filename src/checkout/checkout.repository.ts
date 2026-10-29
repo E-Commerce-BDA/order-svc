@@ -7,6 +7,7 @@ import type {
   OrderRow,
   OrderStatus,
   PaymentLifecycleStatus,
+  PaymentRow,
   PaymentStatus,
 } from '../db/rows.js';
 
@@ -257,6 +258,140 @@ export class CheckoutRepository {
 
   private nextOrderNumber(): string {
     return `${ORDER_NUMBER_PREFIX}${randomInt(100_000, 999_999)}`;
+  }
+
+  /** The unpaid row a resumed attempt should try to capture again. */
+  async findPendingPayment(orderId: string): Promise<PaymentRow | null> {
+    const { rows } = await getPool().query<PaymentRow>(
+      `SELECT * FROM "order".payments
+       WHERE order_id = $1 AND status = 'pending'
+       ORDER BY created_at
+       LIMIT 1;`,
+      [orderId],
+    );
+    return rows[0] ?? null;
+  }
+
+  /**
+   * TX2: the money is in, so the order may become real. One transaction, and the
+   * `status = 'pending'` guards make a replayed confirmation a no-op instead of
+   * a double capture record.
+   */
+  async confirmOrder(
+    orderId: string,
+    capture: { transactionId: string },
+    outbox: OutboxWrite | null,
+  ): Promise<PersistedOrder> {
+    const client = await getPool().connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const payment = await client.query(
+        `UPDATE "order".payments
+         SET status = 'captured', transaction_id = $2, paid_at = now(), updated_at = now()
+         WHERE order_id = $1 AND status = 'pending';`,
+        [orderId, capture.transactionId],
+      );
+      if ((payment.rowCount ?? 0) !== 1) {
+        throw new Error(`Order ${orderId} has no pending payment to confirm`);
+      }
+
+      const order = await client.query<{ order_number: string; user_id: string }>(
+        `UPDATE "order".orders
+         SET status = 'confirmed', payment_status = 'paid', updated_at = now()
+         WHERE id = $1 AND status = 'pending'
+         RETURNING order_number, user_id;`,
+        [orderId],
+      );
+      if (order.rows.length === 0) {
+        throw new Error(`Order ${orderId} is no longer pending`);
+      }
+
+      const { order_number: orderNumber, user_id: userId } = order.rows[0];
+
+      await client.query(
+        `INSERT INTO "order".order_status_history (
+          order_id, from_status, to_status, note, actor
+        ) VALUES ($1, 'pending', 'confirmed', $2, $3);`,
+        [orderId, 'Payment captured', userId],
+      );
+
+      if (outbox) {
+        await client.query(
+          `INSERT INTO "order".outbox (
+            event_id, aggregate_type, aggregate_id, event_type, payload
+          ) VALUES ($1, $2, $3, $4, $5);`,
+          [
+            randomUUID(),
+            'order',
+            orderId,
+            outbox.eventType,
+            JSON.stringify(outbox.payload({ orderId, orderNumber })),
+          ],
+        );
+      }
+
+      await client.query('COMMIT');
+      return { orderId, orderNumber };
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Closes a pending attempt that will never be paid: the order becomes
+   * `failed`, the payment records why, and the history says so. Returns false
+   * when the order was already settled, so a compensation replay is harmless.
+   */
+  async failOrder(
+    orderId: string,
+    note: string,
+    paymentStatus: 'failed' | 'refunded',
+  ): Promise<boolean> {
+    const client = await getPool().connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const order = await client.query<{ user_id: string }>(
+        `UPDATE "order".orders
+         SET status = 'failed', payment_status = $2, updated_at = now()
+         WHERE id = $1 AND status = 'pending'
+         RETURNING user_id;`,
+        [orderId, paymentStatus === 'refunded' ? 'refunded' : 'failed'],
+      );
+
+      if (order.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return false;
+      }
+
+      await client.query(
+        `INSERT INTO "order".order_status_history (
+          order_id, from_status, to_status, note, actor
+        ) VALUES ($1, 'pending', 'failed', $2, $3);`,
+        [orderId, note, order.rows[0].user_id],
+      );
+
+      await client.query(
+        `UPDATE "order".payments
+         SET status = $2, updated_at = now()
+         WHERE order_id = $1 AND status = 'pending';`,
+        [orderId, paymentStatus],
+      );
+
+      await client.query('COMMIT');
+      return true;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 

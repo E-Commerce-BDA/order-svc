@@ -2,6 +2,8 @@ import {
   BadGatewayException,
   BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
   ServiceUnavailableException,
@@ -14,9 +16,11 @@ import { CatalogClient, type ReserveStockResult } from '../clients/catalog.clien
 import { CartClient } from '../clients/cart.client.js';
 import { DiscountsService } from '../discounts/discounts.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
+import type { PaymentResult } from '../payments/payment-provider.interface.js';
 import {
   CheckoutRepository,
   DuplicateIdempotencyKeyError,
+  type OutboxWrite,
 } from './checkout.repository.js';
 import { CheckoutDto } from './dto/checkout.dto.js';
 import type { OrderItemRow, OrderRow } from '../db/rows.js';
@@ -56,6 +60,16 @@ interface CachedResponse {
   bodyHash: string;
   response: CheckoutConfirmation;
 }
+
+/**
+ * Where the saga currently stands, so a failure knows exactly what to undo.
+ *
+ * pricing   → nothing durable exists (only the stock hold)
+ * persisting→ TX1 was attempted
+ * persisted → the order row exists as `pending`, no money has moved
+ * captured  → the provider took the money, TX2 has not committed
+ */
+type SagaPhase = 'pricing' | 'persisting' | 'persisted' | 'captured';
 
 @Injectable()
 export class CheckoutService {
@@ -124,14 +138,15 @@ export class CheckoutService {
         confirmation = await this.placeOrder(userId, key, bodyHash, dto);
       } catch (error) {
         if (!(error instanceof DuplicateIdempotencyKeyError)) throw error;
-        // We lost the insert race. Our own capture and hold were compensated in
-        // placeOrder; the customer's order is the winner's.
+        // We lost the insert race and our hold is already released: nothing was
+        // captured, because the capture can no longer precede the insert. The
+        // customer's order is the winner's, whose own saga may still be pending.
         const winner = await this.checkoutRepository.findByIdempotencyKey(userId, key);
         if (!winner) throw error;
         this.logger.warn(
           `Lost the idempotency race for ${cacheKey}; serving order ${winner.order.id}`,
         );
-        confirmation = this.toConfirmation(winner.order, winner.items);
+        confirmation = await this.replayStoredAttempt(winner.order, winner.items, bodyHash);
       }
 
       await this.cacheResponse(cacheKey, bodyHash, confirmation);
@@ -153,8 +168,8 @@ export class CheckoutService {
     bodyHash: string,
     dto: CheckoutDto,
   ): Promise<CheckoutConfirmation> {
-    // Generated locally and reused as the provider idempotency key, so a retried
-    // capture cannot charge twice.
+    // Generated locally and stored on the order, so a compensation can release
+    // exactly this hold and nothing else.
     const reservationId = randomUUID();
 
     const reservation = await this.catalogClient.reserveStock(
@@ -168,8 +183,10 @@ export class CheckoutService {
 
     if (!reservation.ok) throw this.toStockError(reservation);
 
+    let phase: SagaPhase = 'pricing';
+    let orderId: string | null = null;
+    let transactionId: string | null = null;
     let grandTotal = 0;
-    let capture: { transactionId: string } | null = null;
 
     try {
       const items = await this.priceLines(dto);
@@ -199,26 +216,13 @@ export class CheckoutService {
         Math.round((subtotal + shipping + tax - discount) * 100) / 100,
       );
 
-      const payment = await this.paymentsService.processPayment(
-        dto.payment.provider,
-        grandTotal,
-        reservationId,
-      );
-
-      if (!payment.success) {
-        throw new BadRequestException({
-          code: 'PAYMENT_FAILED',
-          message: payment.errorMessage ?? 'Payment authorization failed',
-        });
-      }
-
-      const transactionId = payment.transactionId ?? `mock_tx_${randomUUID().slice(0, 12)}`;
-      capture = { transactionId };
-
-      const persisted = await this.checkoutRepository.createOrder({
+      // TX1 — the first durable write. It must not exist without a hold, and it
+      // must exist before any money moves.
+      phase = 'persisting';
+      const pending = await this.checkoutRepository.createOrder({
         userId,
-        status: 'confirmed',
-        paymentStatus: 'paid',
+        status: 'pending',
+        paymentStatus: 'pending',
         subtotal,
         shipping,
         tax,
@@ -233,38 +237,46 @@ export class CheckoutService {
         idempotencyBodyHash: bodyHash,
         notes: dto.notes ?? null,
         items,
-        historyNote: 'Order placed and payment authorized',
+        historyNote: 'Order placed, awaiting payment',
         actor: userId,
         payment: {
           provider: dto.payment.provider,
           amount: grandTotal,
-          status: 'captured',
-          transactionId,
+          status: 'pending',
+          transactionId: null,
         },
-        outbox: {
-          eventType: 'order.created',
-          payload: ({ orderId, orderNumber }) => ({
-            orderId,
-            orderNumber,
-            userId,
-            grandTotal,
-            itemsCount: items.length,
-            reservationId,
-            createdAt: new Date().toISOString(),
-          }),
-        },
+        outbox: null,
       });
+      orderId = pending.orderId;
+      phase = 'persisted';
+
+      const capture = await this.capture(orderId, dto.payment.provider, grandTotal);
+      transactionId = capture.transactionId;
+      phase = 'captured';
+
+      // TX2 — only now may the order exist as anything other than pending.
+      await this.checkoutRepository.confirmOrder(
+        orderId,
+        { transactionId },
+        this.orderCreatedEvent({ userId, grandTotal, itemsCount: items.length, reservationId }),
+      );
 
       return {
-        orderId: persisted.orderId,
-        orderNumber: persisted.orderNumber,
+        orderId,
+        orderNumber: pending.orderNumber,
         status: 'confirmed',
         totals: { subtotal, shipping, tax, discount, grandTotal },
         items,
       };
     } catch (error) {
-      await this.compensate(reservationId, capture, grandTotal, error);
-      throw error;
+      throw await this.recover({
+        error,
+        phase,
+        orderId,
+        grandTotal,
+        transactionId,
+        reservationId,
+      });
     }
   }
 
@@ -292,52 +304,294 @@ export class CheckoutService {
   }
 
   /**
-   * Undo what this attempt did, once. The hold is released for free (catalog is
-   * idempotent and the hold expires on its own); a capture is money, so it is
-   * refunded — losing the idempotency race must not charge a customer for an
-   * order we did not write.
+   * Capture against the persisted order, so the provider's idempotency key is the
+   * order id and a resumed attempt re-charges nothing.
+   *
+   * A decline is an answer (402, the attempt is over); a thrown error is not (503,
+   * the attempt stays `pending` and the customer may retry the same key).
    */
-  private async compensate(
-    reservationId: string,
-    capture: { transactionId: string } | null,
+  private async capture(
+    orderId: string,
+    provider: 'mock' | 'stripe' | 'paypal',
     amount: number,
-    error: unknown,
-  ): Promise<void> {
-    if (capture) {
-      const refund = await this.paymentsService
-        .processRefund(capture.transactionId, amount, 'checkout did not persist an order')
-        .catch((refundError: unknown) => {
-          this.logger.error(
-            `Refund of ${capture.transactionId} failed; money is captured without an order`,
-            refundError instanceof Error ? refundError.stack : refundError,
-          );
-          return null;
-        });
+  ): Promise<{ transactionId: string }> {
+    let payment: PaymentResult;
 
-      if (refund && !refund.success) {
-        this.logger.error(
-          `Refund of ${capture.transactionId} was declined: ${refund.errorMessage ?? 'unknown'}`,
-        );
-      }
+    try {
+      payment = await this.paymentsService.processPayment(provider, amount, orderId);
+    } catch (error) {
+      this.logger.error(
+        `Payment provider threw while capturing order ${orderId}`,
+        error instanceof Error ? error.stack : error,
+      );
+      throw new ServiceUnavailableException({
+        code: 'PAYMENT_UNAVAILABLE',
+        message: 'Payment provider is unavailable; retry with the same key',
+      });
     }
 
-    const released = await this.catalogClient.releaseStock(reservationId);
-    if (!released.ok) {
+    if (!payment.success) {
       this.logger.warn(
-        `Release of hold ${reservationId} failed (${released.message}); the hold will expire`,
+        `Payment declined for order ${orderId}: ${payment.errorMessage ?? 'no reason given'}`,
+      );
+      throw new HttpException(
+        {
+          code: 'PAYMENT_FAILED',
+          message: payment.errorMessage ?? 'Payment authorization failed',
+        },
+        HttpStatus.PAYMENT_REQUIRED,
       );
     }
 
-    if (error instanceof DuplicateIdempotencyKeyError) {
-      this.logger.warn(
-        `Compensated the losing attempt for hold ${reservationId} after an idempotency-key race`,
+    return {
+      transactionId: payment.transactionId ?? `mock_tx_${randomUUID().slice(0, 12)}`,
+    };
+  }
+
+  /**
+   * The failure matrix, in one place: what to undo depends only on how far the
+   * saga got. Each branch returns the error the caller should raise, and no
+   * compensation step may throw over the original failure.
+   */
+  private async recover(state: {
+    error: unknown;
+    phase: SagaPhase;
+    orderId: string | null;
+    grandTotal: number;
+    transactionId: string | null;
+    reservationId: string;
+  }): Promise<unknown> {
+    const { error, phase, orderId, grandTotal, transactionId, reservationId } = state;
+
+    if (phase === 'pricing') {
+      // Nothing durable exists; the original status (409/502/503/422) stands.
+      await this.releaseHold(reservationId);
+      return error;
+    }
+
+    if (phase === 'persisting') {
+      await this.releaseHold(reservationId);
+
+      // Someone else owns the key: let checkout() serve the winner.
+      if (error instanceof DuplicateIdempotencyKeyError) return error;
+
+      this.logger.error(
+        `Order for hold ${reservationId} could not be written`,
+        error instanceof Error ? error.stack : error,
+      );
+      return new ServiceUnavailableException({
+        code: 'CHECKOUT_UNAVAILABLE',
+        message: 'Checkout could not be persisted; retry with the same key',
+      });
+    }
+
+    const settledOrderId = orderId as string;
+
+    if (phase === 'persisted') {
+      if (this.isDecline(error)) {
+        await this.closeAttempt(settledOrderId, 'Payment declined', 'failed');
+        await this.releaseHold(reservationId);
+      } else {
+        // Transient: keep the pending row *and* its hold, so the retry resumes the
+        // same hold instead of confirming an order whose stock was released.
+        this.logger.warn(
+          `Order ${settledOrderId} stays pending after an unsettled capture; the retry resumes it`,
+        );
+      }
+      return error;
+    }
+
+    // The money moved and TX2 did not commit: refund, then close what is left.
+    return this.rollBackCapture(
+      settledOrderId,
+      transactionId as string,
+      grandTotal,
+      reservationId,
+    );
+  }
+
+  /**
+   * A `pending` row means an earlier attempt wrote the order and died before the
+   * money settled. The retry finishes that saga: same order, same hold, same
+   * provider idempotency key — never a second reservation or a second order.
+   */
+  private async resumeSaga(
+    order: OrderRow,
+    items: OrderItemRow[],
+  ): Promise<CheckoutConfirmation> {
+    const payment = await this.checkoutRepository.findPendingPayment(order.id);
+
+    if (!payment) {
+      throw new ConflictException({
+        code: 'ORDER_ATTEMPT_CLOSED',
+        message: `Order ${order.order_number} has no payment left to capture; start a new checkout with a new key`,
+      });
+    }
+
+    const grandTotal = Number(order.grand_total);
+    let transactionId: string;
+
+    try {
+      ({ transactionId } = await this.capture(order.id, payment.provider, grandTotal));
+    } catch (error) {
+      if (this.isDecline(error)) {
+        await this.closeAttempt(order.id, 'Payment declined on retry', 'failed');
+        await this.releaseHold(order.stock_reservation_id);
+      }
+      throw error;
+    }
+
+    try {
+      await this.checkoutRepository.confirmOrder(
+        order.id,
+        { transactionId },
+        this.orderCreatedEvent({
+          userId: order.user_id,
+          grandTotal,
+          itemsCount: items.length,
+          reservationId: order.stock_reservation_id ?? '',
+        }),
+      );
+    } catch (error) {
+      this.logger.error(
+        `Resumed order ${order.id} could not be confirmed`,
+        error instanceof Error ? error.stack : error,
+      );
+      throw await this.rollBackCapture(
+        order.id,
+        transactionId,
+        grandTotal,
+        order.stock_reservation_id,
+      );
+    }
+
+    this.logger.log(`Resumed and confirmed pending order ${order.id}`);
+    return this.toConfirmation({ ...order, status: 'confirmed' }, items);
+  }
+
+  /**
+   * Money is captured but the order is not confirmed: refund it, record why, and
+   * release the hold. Failure to refund is loud but never hides the original
+   * failure — the customer must not be told to retry while the money is taken.
+   */
+  private async rollBackCapture(
+    orderId: string,
+    transactionId: string,
+    amount: number,
+    reservationId: string | null,
+  ): Promise<ServiceUnavailableException> {
+    const refunded = await this.refundQuietly(
+      transactionId,
+      amount,
+      'order could not be confirmed',
+    );
+
+    await this.closeAttempt(
+      orderId,
+      refunded
+        ? 'Payment captured but the order could not be confirmed; refunded'
+        : 'Payment captured but the order could not be confirmed; refund failed',
+      refunded ? 'refunded' : 'failed',
+    );
+    await this.releaseHold(reservationId);
+
+    return new ServiceUnavailableException({
+      code: 'PAYMENT_PERSIST_FAILED',
+      message: refunded
+        ? 'The payment was taken but the order could not be confirmed; it has been refunded'
+        : 'The payment was taken but the order could not be confirmed; support will refund it',
+    });
+  }
+
+  private async closeAttempt(
+    orderId: string,
+    note: string,
+    paymentStatus: 'failed' | 'refunded',
+  ): Promise<void> {
+    try {
+      const closed = await this.checkoutRepository.failOrder(orderId, note, paymentStatus);
+      if (!closed) {
+        this.logger.warn(`Order ${orderId} was already settled; nothing to close`);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Unable to close order ${orderId}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
 
   /**
+   * Catalog releases are idempotent server-side, so one attempt at each call site
+   * is enough; a failed release is a warning because the hold expires anyway.
+   */
+  private async releaseHold(reservationId: string | null): Promise<void> {
+    if (!reservationId) return;
+
+    try {
+      const released = await this.catalogClient.releaseStock(reservationId);
+      if (!released.ok) {
+        this.logger.warn(
+          `Release of hold ${reservationId} failed (${released.message}); the hold will expire`,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Release of hold ${reservationId} threw: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async refundQuietly(
+    transactionId: string,
+    amount: number,
+    reason: string,
+  ): Promise<boolean> {
+    try {
+      const refund = await this.paymentsService.processRefund(transactionId, amount, reason);
+      if (!refund.success) {
+        this.logger.error(
+          `Refund of ${transactionId} was declined: ${refund.errorMessage ?? 'unknown reason'}; the money is captured`,
+        );
+        return false;
+      }
+      return true;
+    } catch (error) {
+      this.logger.error(
+        `Refund of ${transactionId} failed; the money is captured`,
+        error instanceof Error ? error.stack : error,
+      );
+      return false;
+    }
+  }
+
+  private orderCreatedEvent(context: {
+    userId: string;
+    grandTotal: number;
+    itemsCount: number;
+    reservationId: string;
+  }): OutboxWrite {
+    return {
+      eventType: 'order.created',
+      payload: ({ orderId, orderNumber }) => ({
+        orderId,
+        orderNumber,
+        userId: context.userId,
+        grandTotal: context.grandTotal,
+        itemsCount: context.itemsCount,
+        reservationId: context.reservationId,
+        createdAt: new Date().toISOString(),
+      }),
+    };
+  }
+
+  /** 402 only comes from `capture`, and it always means "this attempt is over". */
+  private isDecline(error: unknown): boolean {
+    return error instanceof HttpException && error.getStatus() === HttpStatus.PAYMENT_REQUIRED;
+  }
+
+  /**
    * Same key, different body → conflict; a closed attempt → the key is burned; a
-   * pending attempt is still in flight from the customer's point of view.
+   * pending attempt → finish its saga instead of refusing the customer's retry.
    */
   private async replayStoredAttempt(
     order: OrderRow,
@@ -353,13 +607,7 @@ export class CheckoutService {
       });
     }
 
-    if (order.status === 'pending') {
-      // ord-009 resumes the saga here instead of refusing the retry.
-      throw new ConflictException({
-        code: 'IDEMPOTENCY_IN_PROGRESS',
-        message: 'Checkout with this idempotency key is still being settled',
-      });
-    }
+    if (order.status === 'pending') return this.resumeSaga(order, items);
 
     this.logger.log(`Idempotency replay from the database for order ${order.id}`);
     return this.toConfirmation(order, items);
