@@ -237,8 +237,8 @@ export class OrdersRepository {
       const outboxPayload = {
         orderId,
         orderNumber: orderRes.rows[0].order_number,
-        fromStatus: currentStatus,
-        toStatus: nextStatus,
+        from: currentStatus,
+        to: nextStatus,
         note,
         actor,
         timestamp: new Date().toISOString(),
@@ -253,84 +253,6 @@ export class OrdersRepository {
           'order',
           orderId,
           'order.status.updated',
-          JSON.stringify(outboxPayload),
-        ],
-      );
-
-      await client.query('COMMIT');
-      return orderRes.rows[0];
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
-  }
-
-  /**
-   * Transactionally refunds order, updates payment status, records history, and enqueues outbox event.
-   */
-  async refundOrderWithHistory(
-    orderId: string,
-    currentStatus: OrderStatus,
-    refundAmount: string,
-    reason: string | null,
-    actor: string,
-  ): Promise<OrderRow> {
-    const client = await getPool().connect();
-    try {
-      await client.query('BEGIN');
-
-      const orderRes = await client.query<OrderRow>(
-        `UPDATE "order".orders
-         SET status = 'refunded', payment_status = 'refunded', updated_at = now()
-         WHERE id = $1
-         RETURNING *;`,
-        [orderId],
-      );
-
-      if (orderRes.rows.length === 0) {
-        throw new NotFoundException(`Order ${orderId} not found`);
-      }
-
-      await client.query(
-        `INSERT INTO "order".order_status_history (
-          order_id, from_status, to_status, note, actor
-        ) VALUES ($1, $2, $3, $4, $5);`,
-        [
-          orderId,
-          currentStatus,
-          'refunded',
-          reason ? `Refund: ${reason}` : 'Order refunded',
-          actor,
-        ],
-      );
-
-      await client.query(
-        `UPDATE "order".payments
-         SET status = 'refunded', updated_at = now()
-         WHERE order_id = $1;`,
-        [orderId],
-      );
-
-      const outboxPayload = {
-        orderId,
-        orderNumber: orderRes.rows[0].order_number,
-        refundAmount,
-        reason,
-        actor,
-        timestamp: new Date().toISOString(),
-      };
-
-      await client.query(
-        `INSERT INTO "order".outbox (
-          event_id, aggregate_type, aggregate_id, event_type, payload
-        ) VALUES ($1, $2, $3, $4, $5);`,
-        [
-          randomUUID(),
-          'order',
-          orderId,
-          'order.refunded',
           JSON.stringify(outboxPayload),
         ],
       );
