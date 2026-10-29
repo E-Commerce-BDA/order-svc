@@ -15,6 +15,7 @@ import {
   CatalogClient,
   type ProductSnapshot,
 } from './../src/clients/catalog.client.js';
+import { RedisService } from './../src/redis/redis.service.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -29,6 +30,7 @@ describe('Checkout (e2e)', () => {
   let app: INestApplication<App>;
   let jwtService: JwtService;
   let customerToken: string;
+  let otherCustomerToken: string;
   let mockCatalogClient: {
     reserveStock: ReturnType<typeof vi.fn>;
     releaseStock: ReturnType<typeof vi.fn>;
@@ -36,6 +38,7 @@ describe('Checkout (e2e)', () => {
   };
 
   const userId = '018f0000-0000-7000-8000-000000000001';
+  const otherUserId = '018f0000-0000-7000-8000-000000000002';
   const productId = '018f0000-0000-7000-8000-000000000101';
   const variantId = '018f0000-0000-7000-8000-000000000201';
   const UUID_RE =
@@ -154,6 +157,20 @@ describe('Checkout (e2e)', () => {
       {
         sub: userId,
         email: 'customer@example.com',
+        roles: ['customer'],
+      },
+      {
+        secret,
+        issuer: JWT_ISSUER,
+        audience: JWT_AUDIENCE,
+        algorithm: JWT_ALGORITHM,
+        expiresIn: '1h',
+      },
+    );
+    otherCustomerToken = await jwtService.signAsync(
+      {
+        sub: otherUserId,
+        email: 'other@example.com',
         roles: ['customer'],
       },
       {
@@ -330,7 +347,7 @@ describe('Checkout (e2e)', () => {
       .send(sampleCheckoutPayload())
       .expect(409);
 
-    expect(res.body.message).toContain('INSUFFICIENT_STOCK');
+    expect(res.body.code).toBe('INSUFFICIENT_STOCK');
   });
 
   it('replays identical response instantly when resubmitting with same idempotency key', async () => {
@@ -393,7 +410,124 @@ describe('Checkout (e2e)', () => {
       .send(payload2)
       .expect(409);
 
-    expect(conflictRes.body.message).toContain('IDEMPOTENCY_CONFLICT');
+    expect(conflictRes.body.code).toBe('IDEMPOTENCY_CONFLICT');
+  });
+
+  it('isolates the same key between two customers', async () => {
+    // The regression that motivated ord-008: a global idem:{key} served one
+    // customer's confirmation to another.
+    const key = `idem-shared-${randomUUID()}`;
+    const payload = sampleCheckoutPayload();
+
+    const first = await request(app.getHttpServer())
+      .post('/api/v1/checkout')
+      .set('Authorization', `Bearer ${customerToken}`)
+      .set('x-idempotency-key', key)
+      .send(payload)
+      .expect(201);
+
+    const second = await request(app.getHttpServer())
+      .post('/api/v1/checkout')
+      .set('Authorization', `Bearer ${otherCustomerToken}`)
+      .set('x-idempotency-key', key)
+      .send(payload)
+      .expect(201);
+
+    expect(second.body.orderId).not.toBe(first.body.orderId);
+
+    const { rows } = await getPool().query<{ user_id: string }>(
+      `SELECT user_id FROM "order".orders WHERE idempotency_key = $1 ORDER BY user_id;`,
+      [key],
+    );
+    expect(rows.map((row) => row.user_id)).toEqual([userId, otherUserId]);
+  });
+
+  it('replays from the order row after the cache entry is gone', async () => {
+    const key = `idem-db-replay-${randomUUID()}`;
+    const payload = sampleCheckoutPayload();
+
+    const first = await request(app.getHttpServer())
+      .post('/api/v1/checkout')
+      .set('Authorization', `Bearer ${customerToken}`)
+      .set('x-idempotency-key', key)
+      .send(payload)
+      .expect(201);
+
+    await app.get(RedisService).del(`idem:${userId}:checkout:${key}`);
+
+    const replay = await request(app.getHttpServer())
+      .post('/api/v1/checkout')
+      .set('Authorization', `Bearer ${customerToken}`)
+      .set('x-idempotency-key', key)
+      .send(payload)
+      .expect(201);
+
+    expect(replay.body.orderId).toBe(first.body.orderId);
+    expect(replay.body.orderNumber).toBe(first.body.orderNumber);
+
+    const { rows } = await getPool().query<{ count: string }>(
+      `SELECT count(*) FROM "order".orders WHERE user_id = $1 AND idempotency_key = $2;`,
+      [userId, key],
+    );
+    expect(Number(rows[0].count)).toBe(1);
+  });
+
+  it('detects a reused key with a different body from the stored hash, not the cache', async () => {
+    const key = `idem-db-conflict-${randomUUID()}`;
+
+    await request(app.getHttpServer())
+      .post('/api/v1/checkout')
+      .set('Authorization', `Bearer ${customerToken}`)
+      .set('x-idempotency-key', key)
+      .send(sampleCheckoutPayload())
+      .expect(201);
+
+    // Drop the cache so only the persisted body hash can answer.
+    await app.get(RedisService).del(`idem:${userId}:checkout:${key}`);
+
+    const changed = sampleCheckoutPayload();
+    changed.items[0].qty = 3;
+
+    const conflict = await request(app.getHttpServer())
+      .post('/api/v1/checkout')
+      .set('Authorization', `Bearer ${customerToken}`)
+      .set('x-idempotency-key', key)
+      .send(changed)
+      .expect(409);
+
+    expect(conflict.body.code).toBe('IDEMPOTENCY_CONFLICT');
+  });
+
+  it('writes exactly one order when the same request is submitted twice at once', async () => {
+    const key = `idem-concurrent-${randomUUID()}`;
+    const payload = sampleCheckoutPayload();
+
+    const send = () =>
+      request(app.getHttpServer())
+        .post('/api/v1/checkout')
+        .set('Authorization', `Bearer ${customerToken}`)
+        .set('x-idempotency-key', key)
+        .send(payload);
+
+    const responses = await Promise.all([send(), send()]);
+    const statuses = responses.map((response) => response.status);
+
+    // Whichever loses the race is either refused while the winner holds the
+    // lock (409) or replayed from the row (201) — never a second order.
+    for (const status of statuses) {
+      expect([201, 409]).toContain(status);
+    }
+    const created = responses.filter((response) => response.status === 201);
+    expect(created.length).toBeGreaterThanOrEqual(1);
+    if (created.length === 2) {
+      expect(created[0].body.orderId).toBe(created[1].body.orderId);
+    }
+
+    const { rows } = await getPool().query<{ count: string }>(
+      `SELECT count(*) FROM "order".orders WHERE user_id = $1 AND idempotency_key = $2;`,
+      [userId, key],
+    );
+    expect(Number(rows[0].count)).toBe(1);
   });
 
   it('rejects with 422 COUPON_INVALID and releases stock when coupon has expired', async () => {
@@ -411,6 +545,70 @@ describe('Checkout (e2e)', () => {
     expect(res.body.message).toContain('expired');
     // Stock release compensation must have been invoked
     expect(mockCatalogClient.releaseStock).toHaveBeenCalled();
+  });
+
+  /**
+   * Redis is a hard dependency *before* the first durable write: without it we
+   * cannot tell whether another attempt is already running, so checkout has to
+   * refuse rather than risk a second order. Nothing may be written.
+   */
+  describe('with an unreachable redis', () => {
+    let brokenApp: INestApplication<App>;
+
+    beforeAll(async () => {
+      const unavailable = () => Promise.reject(new Error('ECONNREFUSED'));
+
+      const moduleFixture: TestingModule = await Test.createTestingModule({
+        imports: [AppModule],
+      })
+        .overrideProvider(CatalogClient)
+        .useValue(createCatalogFake())
+        .overrideProvider(RedisService)
+        .useValue({
+          get: unavailable,
+          set: unavailable,
+          setnx: unavailable,
+          del: unavailable,
+          ping: async () => false,
+        })
+        .compile();
+
+      brokenApp = moduleFixture.createNestApplication();
+      brokenApp.setGlobalPrefix('/api/v1', {
+        exclude: ['health', 'health/ready'],
+      });
+      brokenApp.useGlobalPipes(
+        new ValidationPipe({
+          whitelist: true,
+          forbidNonWhitelisted: true,
+          transform: true,
+        }),
+      );
+      await brokenApp.init();
+    });
+
+    afterAll(async () => {
+      await brokenApp.close();
+    });
+
+    it('fails closed with 503 IDEMPOTENCY_UNAVAILABLE and writes no order', async () => {
+      const key = `idem-redis-down-${randomUUID()}`;
+
+      const res = await request(brokenApp.getHttpServer())
+        .post('/api/v1/checkout')
+        .set('Authorization', `Bearer ${customerToken}`)
+        .set('x-idempotency-key', key)
+        .send(sampleCheckoutPayload())
+        .expect(503);
+
+      expect(res.body.code).toBe('IDEMPOTENCY_UNAVAILABLE');
+
+      const { rows } = await getPool().query<{ count: string }>(
+        `SELECT count(*) FROM "order".orders WHERE idempotency_key = $1;`,
+        [key],
+      );
+      expect(Number(rows[0].count)).toBe(0);
+    });
   });
 });
 
