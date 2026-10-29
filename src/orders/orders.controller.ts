@@ -22,7 +22,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard.js';
 import type { AuthenticatedRequest } from '../auth/guards/jwt-auth.guard.js';
 import { RolesGuard } from '../auth/guards/roles.guard.js';
 import { Roles } from '../auth/decorators/roles.decorator.js';
-import type { OrderRow, OrderStatusHistoryRow } from '../db/rows.js';
+import type { OrderRow, OrderStatusHistoryRow, RefundRow } from '../db/rows.js';
 import type { OrderWithDetails } from './orders.repository.js';
 
 @Controller(['me/orders', 'order/me/orders', 'orders/me'])
@@ -108,6 +108,9 @@ export class OrdersController {
 
   /**
    * Admin: Process order refund.
+   *
+   * The refund is the provider's answer, not our intention: the response carries
+   * the ledger row so the caller can see the provider reference.
    */
   @Post(':id/refund')
   @UseGuards(JwtAuthGuard, RolesGuard)
@@ -117,9 +120,8 @@ export class OrdersController {
     @Req() req: AuthenticatedRequest,
     @Param('id') id: string,
     @Body() dto: RefundOrderDto,
-  ): Promise<{ order: OrderRow }> {
+  ): Promise<{ order: OrderRow; refund: RefundRow }> {
     const actor = req.user?.sub ?? 'admin';
-    const order = await this.ordersService.refundOrder(id, dto, actor);
-    return { order };
+    return this.ordersService.refundOrder(id, dto, actor);
   }
 }

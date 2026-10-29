@@ -5,12 +5,14 @@ import {
 } from './orders.controller.js';
 import { OrdersService } from './orders.service.js';
 import { OrdersRepository } from './orders.repository.js';
+import { RefundsRepository } from './refunds.repository.js';
 import { ClientsModule } from '../clients/clients.module.js';
+import { PaymentsModule } from '../payments/payments.module.js';
 
 @Module({
-  imports: [ClientsModule],
+  imports: [ClientsModule, PaymentsModule],
   controllers: [CustomerOrdersController, OrdersController],
-  providers: [OrdersService, OrdersRepository],
-  exports: [OrdersService, OrdersRepository],
+  providers: [OrdersService, OrdersRepository, RefundsRepository],
+  exports: [OrdersService, OrdersRepository, RefundsRepository],
 })
 export class OrdersModule {}

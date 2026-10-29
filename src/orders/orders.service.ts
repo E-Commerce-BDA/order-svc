@@ -1,14 +1,19 @@
 import {
+  BadGatewayException,
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { OrdersRepository, type OrderWithDetails } from './orders.repository.js';
+import { RefundsRepository } from './refunds.repository.js';
 import { assertValidTransition } from './order-state-machine.js';
 import { CatalogClient } from '../clients/catalog.client.js';
-import type { OrderRow, OrderStatusHistoryRow } from '../db/rows.js';
+import { PaymentsService } from '../payments/payments.service.js';
+import type { PaymentResult } from '../payments/payment-provider.interface.js';
+import type { OrderRow, OrderStatusHistoryRow, RefundRow } from '../db/rows.js';
 import type {
   AdminOrderQueryDto,
   CustomerOrderQueryDto,
@@ -27,7 +32,9 @@ export class OrdersService {
 
   constructor(
     private readonly ordersRepository: OrdersRepository,
+    private readonly refundsRepository: RefundsRepository,
     private readonly catalogClient: CatalogClient,
+    private readonly paymentsService: PaymentsService,
   ) {}
 
   /**
@@ -140,36 +147,101 @@ export class OrdersService {
   }
 
   /**
-   * Admin order refund processing with amount validation and state transition.
+   * Admin refund. The provider is the one that actually returns the money, so the
+   * ledger row is reserved first and settled only after the provider answers:
+   * the books can never claim a refund that did not happen.
    */
   async refundOrder(
     orderId: string,
     dto: RefundOrderDto,
     actor: string,
-  ): Promise<OrderRow> {
+  ): Promise<{ order: OrderRow; refund: RefundRow }> {
     const order = await this.ordersRepository.findOrderById(orderId);
     if (!order) {
       throw new NotFoundException(`Order ${orderId} not found`);
     }
 
-    assertValidTransition(order.status, 'refunded');
+    const existing = await this.refundsRepository.findByOrderId(orderId);
+
+    // The ledger is the idempotency gate: a settled refund is returned as-is, so
+    // replaying the call never moves money twice.
+    if (existing?.status === 'succeeded') return { order, refund: existing };
+    if (existing?.status === 'pending') throw refundInProgress(orderId);
 
     const grandTotalNum = parseFloat(order.grand_total);
-    const refundAmountNum = dto.amount ?? grandTotalNum;
+    const requestedAmount = dto.amount ?? grandTotalNum;
 
-    if (refundAmountNum > grandTotalNum) {
+    if (requestedAmount > grandTotalNum) {
       throw new BadRequestException(
-        `Refund amount ($${refundAmountNum.toFixed(2)}) exceeds order grand total ($${grandTotalNum.toFixed(2)})`,
+        `Refund amount ($${requestedAmount.toFixed(2)}) exceeds order grand total ($${grandTotalNum.toFixed(2)})`,
       );
     }
 
-    const refundAmountStr = refundAmountNum.toFixed(2);
-    return this.ordersRepository.refundOrderWithHistory(
-      orderId,
-      order.status,
-      refundAmountStr,
-      dto.reason ?? null,
-      actor,
-    );
+    assertValidTransition(order.status, 'refunded');
+
+    const payment = await this.refundsRepository.findCapturedPayment(orderId);
+    if (!payment?.transaction_id) {
+      throw new ConflictException({
+        code: 'NO_CAPTURED_PAYMENT',
+        message: `Order ${orderId} has no captured payment to refund`,
+      });
+    }
+
+    let refund = existing;
+    if (!refund) {
+      const started = await this.refundsRepository.startRefund({
+        orderId,
+        paymentId: payment.id,
+        amount: Math.round(requestedAmount * 100) / 100,
+        reason: dto.reason ?? null,
+        requestedBy: actor,
+      });
+      refund = started.refund;
+
+      if (!started.created) {
+        if (refund.status === 'succeeded') return { order, refund };
+        if (refund.status === 'pending') throw refundInProgress(orderId);
+      }
+    }
+
+    // A failed attempt is retried in place, with the amount it was reserved for,
+    // so a provider outage cannot change what the customer gets back.
+    const amount = Number(refund.amount);
+    let result: PaymentResult;
+
+    try {
+      result = await this.paymentsService.processRefund(
+        payment.transaction_id,
+        amount,
+        refund.reason ?? undefined,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Refund of ${payment.transaction_id} threw`,
+        error instanceof Error ? error.stack : error,
+      );
+      await this.refundsRepository.markFailed(refund.id, 'Payment provider unreachable');
+      throw new BadGatewayException({
+        code: 'REFUND_PROVIDER_FAILED',
+        message: 'The payment provider could not be reached; retry the refund',
+      });
+    }
+
+    if (!result.success) {
+      const reason = result.errorMessage ?? 'The payment provider declined the refund';
+      this.logger.warn(`Refund of ${payment.transaction_id} failed: ${reason}`);
+      await this.refundsRepository.markFailed(refund.id, reason);
+      throw new BadGatewayException({ code: 'REFUND_PROVIDER_FAILED', message: reason });
+    }
+
+    const providerReference = result.transactionId ?? `refund_${refund.id}`;
+    return this.refundsRepository.markSucceeded(refund.id, providerReference);
   }
+}
+
+function refundInProgress(orderId: string): ConflictException {
+  return new ConflictException({
+    code: 'REFUND_IN_PROGRESS',
+    message: `A refund for order ${orderId} is still being processed`,
+  });
 }
