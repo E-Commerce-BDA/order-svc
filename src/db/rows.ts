@@ -56,6 +56,8 @@ export interface OrderRow {
   billing_address: OrderAddress;
   discount_code_id: string | null;
   stock_reservation_id: string | null;
+  idempotency_key: string | null;
+  idempotency_body_hash: string | null;
   notes: string | null;
   created_at: string;
   updated_at: string;
