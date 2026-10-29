@@ -1,7 +1,7 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { Test, TestingModule } from '@nestjs/testing';
+import { Test, TestingModule, type TestingModuleBuilder } from '@nestjs/testing';
 import request from 'supertest';
 import { App } from 'supertest/types.js';
 import { AppModule } from './../src/app.module.js';
@@ -15,11 +15,19 @@ import {
   CatalogClient,
   type ProductSnapshot,
 } from './../src/clients/catalog.client.js';
+import { CheckoutRepository } from './../src/checkout/checkout.repository.js';
+import { PaymentsService } from './../src/payments/payments.service.js';
 import { RedisService } from './../src/redis/redis.service.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { OrderRow, OrderItemRow, OutboxRow, PaymentRow } from '../src/db/rows.js';
+import type {
+  OrderRow,
+  OrderItemRow,
+  OrderStatusHistoryRow,
+  OutboxRow,
+  PaymentRow,
+} from '../src/db/rows.js';
 
 if (!process.env.DATABASE_URL && typeof process.loadEnvFile === 'function') {
   process.loadEnvFile();
@@ -114,6 +122,47 @@ describe('Checkout (e2e)', () => {
       return map;
     }),
   });
+
+  /**
+   * A second app for the cases that need a different provider or a broken
+   * collaborator. Each one owns its own catalog fake so call counts stay local.
+   */
+  const launchApp = async (
+    catalog: ReturnType<typeof createCatalogFake>,
+    customize?: (builder: TestingModuleBuilder) => TestingModuleBuilder,
+  ): Promise<INestApplication<App>> => {
+    let builder = Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(CatalogClient)
+      .useValue(catalog);
+
+    if (customize) builder = customize(builder);
+
+    const moduleFixture: TestingModule = await builder.compile();
+    const instance = moduleFixture.createNestApplication();
+    instance.setGlobalPrefix('/api/v1', {
+      exclude: ['health', 'health/ready'],
+    });
+    instance.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
+    await instance.init();
+
+    // A second app in the same process gets its own ioredis client, and
+    // `enableOfflineQueue: false` makes any command issued before the socket is
+    // up fail with "stream isn't writeable". Wait for it, or the first request
+    // of the suite races the connect.
+    const redis = instance.get(RedisService);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (await redis.ping()) return instance;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    throw new Error('The second app could not reach Redis');
+  };
 
   beforeAll(async () => {
     // Apply every migration in filename order so 003+ is picked up
@@ -545,6 +594,241 @@ describe('Checkout (e2e)', () => {
     expect(res.body.message).toContain('expired');
     // Stock release compensation must have been invoked
     expect(mockCatalogClient.releaseStock).toHaveBeenCalled();
+  });
+
+  /**
+   * ord-009: money may only move once the order row exists, and every failure
+   * after the first durable write has to leave something consistent behind.
+   */
+  describe('payment saga', () => {
+    let sagaApp: INestApplication<App>;
+    let sagaCatalog: ReturnType<typeof createCatalogFake>;
+
+    interface CaptureAttempt {
+      orderId: string;
+      transactionId: string;
+      status: string | undefined;
+      paymentStatus: string | undefined;
+    }
+
+    const settle = {
+      captures: [] as CaptureAttempt[],
+      refunds: [] as Array<{ transactionId: string; amount: number; reason?: string }>,
+      decline: false,
+      throwOnce: false,
+    };
+
+    const paymentsFake = {
+      processPayment: async (
+        _provider: string,
+        _amount: number,
+        orderId: string,
+      ): Promise<{ success: boolean; transactionId?: string; errorMessage?: string }> => {
+        // Read the row *at capture time*: this is the structural proof that no
+        // payment is authorised before the order exists, and that a resumed
+        // attempt still finds it pending.
+        const { rows } = await getPool().query<{ status: string; payment_status: string }>(
+          `SELECT status, payment_status FROM "order".orders WHERE id = $1;`,
+          [orderId],
+        );
+        const transactionId = `mock_tx_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+        settle.captures.push({
+          orderId,
+          transactionId,
+          status: rows[0]?.status,
+          paymentStatus: rows[0]?.payment_status,
+        });
+
+        if (settle.throwOnce) {
+          settle.throwOnce = false;
+          throw new Error('socket hang up');
+        }
+
+        if (settle.decline) return { success: false, errorMessage: 'Declined by issuer' };
+
+        return { success: true, transactionId };
+      },
+      processRefund: async (transactionId: string, amount: number, reason?: string) => {
+        settle.refunds.push({ transactionId, amount, reason });
+        return {
+          success: true,
+          transactionId: `mock_ref_${randomUUID().replace(/-/g, '').slice(0, 16)}`,
+        };
+      },
+    };
+
+    beforeAll(async () => {
+      sagaCatalog = createCatalogFake();
+      sagaApp = await launchApp(sagaCatalog, (builder) =>
+        builder.overrideProvider(PaymentsService).useValue(paymentsFake),
+      );
+    });
+
+    afterAll(async () => {
+      await sagaApp.close();
+    });
+
+    beforeEach(() => {
+      vi.restoreAllMocks();
+      settle.captures.length = 0;
+      settle.refunds.length = 0;
+      settle.decline = false;
+      settle.throwOnce = false;
+      sagaCatalog.reserveStock.mockClear();
+      sagaCatalog.releaseStock.mockClear();
+    });
+
+    const checkoutWith = (key: string, body: object = sampleCheckoutPayload()) =>
+      request(sagaApp.getHttpServer())
+        .post('/api/v1/checkout')
+        .set('Authorization', `Bearer ${customerToken}`)
+        .set('x-idempotency-key', key)
+        .send(body);
+
+    const orderByKey = async (key: string): Promise<OrderRow[]> => {
+      const { rows } = await getPool().query<OrderRow>(
+        `SELECT * FROM "order".orders WHERE user_id = $1 AND idempotency_key = $2;`,
+        [userId, key],
+      );
+      return rows;
+    };
+
+    it('captures only after the order row exists as pending', async () => {
+      const key = `idem-saga-${randomUUID()}`;
+      const res = await checkoutWith(key).expect(201);
+
+      expect(res.body.status).toBe('confirmed');
+      expect(settle.captures).toHaveLength(1);
+      expect(settle.captures[0].orderId).toBe(res.body.orderId);
+      expect(settle.captures[0].status).toBe('pending');
+      expect(settle.captures[0].paymentStatus).toBe('pending');
+
+      const payments = await getPool().query<PaymentRow>(
+        `SELECT * FROM "order".payments WHERE order_id = $1;`,
+        [res.body.orderId],
+      );
+      expect(payments.rows).toHaveLength(1);
+      expect(payments.rows[0].status).toBe('captured');
+      expect(payments.rows[0].transaction_id).toBe(settle.captures[0].transactionId);
+
+      const history = await getPool().query<OrderStatusHistoryRow>(
+        `SELECT * FROM "order".order_status_history WHERE order_id = $1 ORDER BY created_at;`,
+        [res.body.orderId],
+      );
+      expect(history.rows.map((row) => [row.from_status, row.to_status])).toEqual([
+        [null, 'pending'],
+        ['pending', 'confirmed'],
+      ]);
+
+      const outbox = await getPool().query<OutboxRow>(
+        `SELECT * FROM "order".outbox WHERE aggregate_id = $1;`,
+        [res.body.orderId],
+      );
+      expect(outbox.rows).toHaveLength(1);
+      expect(outbox.rows[0].event_type).toBe('order.created');
+    });
+
+    it('fails the attempt, releases the hold and burns the key when the card is declined', async () => {
+      settle.decline = true;
+      const key = `idem-declined-${randomUUID()}`;
+      const res = await checkoutWith(key).expect(402);
+
+      expect(res.body.code).toBe('PAYMENT_FAILED');
+
+      const [order] = await orderByKey(key);
+      expect(order.status).toBe('failed');
+      expect(order.payment_status).toBe('failed');
+
+      const payments = await getPool().query<PaymentRow>(
+        `SELECT * FROM "order".payments WHERE order_id = $1;`,
+        [order.id],
+      );
+      expect(payments.rows[0].status).toBe('failed');
+
+      const history = await getPool().query<OrderStatusHistoryRow>(
+        `SELECT * FROM "order".order_status_history WHERE order_id = $1 ORDER BY created_at;`,
+        [order.id],
+      );
+      expect(history.rows.map((row) => row.to_status)).toEqual(['pending', 'failed']);
+
+      const outbox = await getPool().query<OutboxRow>(
+        `SELECT * FROM "order".outbox WHERE aggregate_id = $1;`,
+        [order.id],
+      );
+      expect(outbox.rows).toHaveLength(0);
+
+      expect(sagaCatalog.releaseStock).toHaveBeenCalledTimes(1);
+      expect(sagaCatalog.releaseStock).toHaveBeenCalledWith(order.stock_reservation_id);
+
+      const retry = await checkoutWith(key).expect(409);
+      expect(retry.body.code).toBe('ORDER_ATTEMPT_CLOSED');
+      expect(settle.captures).toHaveLength(1);
+    });
+
+    it('refunds the capture and closes the order when the confirmation cannot be persisted', async () => {
+      const key = `idem-persist-fail-${randomUUID()}`;
+      const repository = sagaApp.get(CheckoutRepository);
+      vi.spyOn(repository, 'confirmOrder').mockRejectedValueOnce(new Error('deadlock detected'));
+
+      const res = await checkoutWith(key).expect(503);
+      expect(res.body.code).toBe('PAYMENT_PERSIST_FAILED');
+
+      expect(settle.refunds).toHaveLength(1);
+      expect(settle.refunds[0].transactionId).toBe(settle.captures[0].transactionId);
+      expect(settle.refunds[0].amount).toBe(144);
+
+      const [order] = await orderByKey(key);
+      expect(order.status).toBe('failed');
+      expect(order.payment_status).toBe('refunded');
+
+      const payments = await getPool().query<PaymentRow>(
+        `SELECT * FROM "order".payments WHERE order_id = $1;`,
+        [order.id],
+      );
+      expect(payments.rows[0].status).toBe('refunded');
+
+      const outbox = await getPool().query<OutboxRow>(
+        `SELECT * FROM "order".outbox WHERE aggregate_id = $1;`,
+        [order.id],
+      );
+      expect(outbox.rows).toHaveLength(0);
+      expect(sagaCatalog.releaseStock).toHaveBeenCalledTimes(1);
+    });
+
+    it('resumes a pending attempt on the same order, hold and key', async () => {
+      settle.throwOnce = true;
+      const key = `idem-resume-${randomUUID()}`;
+      const payload = sampleCheckoutPayload();
+
+      const failedAttempt = await checkoutWith(key, payload).expect(503);
+      expect(failedAttempt.body.code).toBe('PAYMENT_UNAVAILABLE');
+
+      const [pending] = await orderByKey(key);
+      expect(pending.status).toBe('pending');
+      // The hold must survive the transient failure, otherwise the resume would
+      // confirm stock that has already been given back.
+      expect(sagaCatalog.releaseStock).not.toHaveBeenCalled();
+
+      const resumed = await checkoutWith(key, payload).expect(201);
+      expect(resumed.body.orderId).toBe(pending.id);
+      expect(resumed.body.orderNumber).toBe(pending.order_number);
+      expect(resumed.body.status).toBe('confirmed');
+
+      // Two capture attempts, both against the same still-pending row: one order,
+      // one reservation, one confirmation.
+      expect(settle.captures).toHaveLength(2);
+      expect(settle.captures[1].orderId).toBe(pending.id);
+      expect(settle.captures[1].status).toBe('pending');
+      expect(sagaCatalog.reserveStock).toHaveBeenCalledTimes(1);
+      expect(await orderByKey(key)).toHaveLength(1);
+
+      const outbox = await getPool().query<OutboxRow>(
+        `SELECT * FROM "order".outbox WHERE aggregate_id = $1;`,
+        [pending.id],
+      );
+      expect(outbox.rows).toHaveLength(1);
+      expect(outbox.rows[0].payload.reservationId).toBe(pending.stock_reservation_id);
+    });
   });
 
   /**

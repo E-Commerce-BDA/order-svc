@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import {
   BadGatewayException,
-  BadRequestException,
   ConflictException,
+  HttpException,
+  HttpStatus,
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
@@ -13,9 +14,13 @@ import { CartClient } from '../clients/cart.client.js';
 import { DiscountsService } from '../discounts/discounts.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import { canonicalJson } from '../common/canonical-json.js';
-import { CheckoutRepository, DuplicateIdempotencyKeyError } from './checkout.repository.js';
+import {
+  CheckoutRepository,
+  DuplicateIdempotencyKeyError,
+  type OutboxWrite,
+} from './checkout.repository.js';
 import { CheckoutDto } from './dto/checkout.dto.js';
-import type { OrderItemRow, OrderRow } from '../db/rows.js';
+import type { OrderItemRow, OrderRow, PaymentRow } from '../db/rows.js';
 
 const USER_ID = 'user-1';
 const KEY = 'key-123';
@@ -44,6 +49,9 @@ describe('CheckoutService', () => {
   let mockRepository: {
     findByIdempotencyKey: ReturnType<typeof vi.fn>;
     createOrder: ReturnType<typeof vi.fn>;
+    findPendingPayment: ReturnType<typeof vi.fn>;
+    confirmOrder: ReturnType<typeof vi.fn>;
+    failOrder: ReturnType<typeof vi.fn>;
   };
 
   const createSampleDto = (): CheckoutDto => ({
@@ -119,6 +127,30 @@ describe('CheckoutService', () => {
     line_total: '160.00',
     options: null,
   });
+
+  const pendingPayment = (overrides: Partial<PaymentRow> = {}): PaymentRow => ({
+    id: 'payment-1',
+    order_id: 'order-123',
+    provider: 'mock',
+    amount: '160.00',
+    status: 'pending',
+    transaction_id: null,
+    paid_at: null,
+    created_at: '2026-10-29T10:00:00Z',
+    updated_at: '2026-10-29T10:00:00Z',
+    ...overrides,
+  });
+
+  /** Every saga failure is asserted on its status *and* its machine code. */
+  const rejection = async (promise: Promise<unknown>): Promise<HttpException> => {
+    try {
+      await promise;
+    } catch (error) {
+      if (!(error instanceof HttpException)) throw error;
+      return error;
+    }
+    throw new Error('Expected the promise to reject with an HttpException');
+  };
 
   const cachedPayload = (
     dto: CheckoutDto,
@@ -206,6 +238,11 @@ describe('CheckoutService', () => {
       createOrder: vi
         .fn()
         .mockResolvedValue({ orderId: 'order-123', orderNumber: '#2026-123456' }),
+      findPendingPayment: vi.fn().mockResolvedValue(null),
+      confirmOrder: vi
+        .fn()
+        .mockResolvedValue({ orderId: 'order-123', orderNumber: '#2026-123456' }),
+      failOrder: vi.fn().mockResolvedValue(true),
     };
 
     service = new CheckoutService(
@@ -351,7 +388,7 @@ describe('CheckoutService', () => {
       expect(result.status).toBe('confirmed');
     });
 
-    it('serves the winner and compensates the losing attempt on a duplicate-key race', async () => {
+    it('serves the winner and releases only its own hold on a duplicate-key race', async () => {
       mockRepository.createOrder.mockRejectedValueOnce(
         new DuplicateIdempotencyKeyError(KEY),
       );
@@ -362,11 +399,9 @@ describe('CheckoutService', () => {
       const result = await service.checkout(USER_ID, KEY, createSampleDto());
 
       expect(result.orderId).toBe('order-123');
-      expect(mockPaymentsService.processRefund).toHaveBeenCalledWith(
-        'mock_tx_123',
-        expect.any(Number),
-        expect.stringContaining('persist'),
-      );
+      // Nothing was captured: the insert is now the first durable write, so the
+      // loser of the race has no money to refund.
+      expect(mockPaymentsService.processRefund).not.toHaveBeenCalled();
       expect(mockCatalogClient.releaseStock).toHaveBeenCalledTimes(1);
     });
 
@@ -385,39 +420,167 @@ describe('CheckoutService', () => {
     });
   });
 
-  describe('happy path', () => {
-    it('persists the order with the key, the body hash and the hold', async () => {
+  describe('pending-first payment saga', () => {
+    it('persists a pending order before it captures, then confirms it', async () => {
       const dto = createSampleDto();
       const result = await service.checkout(USER_ID, KEY, dto);
 
       expect(result.orderId).toBe('order-123');
       expect(result.status).toBe('confirmed');
       expect(result.orderNumber).toMatch(/^#2026-\d{6}$/);
+      expect(result.totals.grandTotal).toBe(160);
 
+      // TX1 — the row exists as `pending`, with no money and no event yet.
       expect(mockRepository.createOrder).toHaveBeenCalledWith(
         expect.objectContaining({
           userId: USER_ID,
-          status: 'confirmed',
-          paymentStatus: 'paid',
+          status: 'pending',
+          paymentStatus: 'pending',
           idempotencyKey: KEY,
           idempotencyBodyHash: bodyHashOf(dto),
           stockReservationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
           grandTotal: 160,
-          payment: expect.objectContaining({
-            status: 'captured',
-            transactionId: 'mock_tx_123',
-          }),
-          outbox: expect.objectContaining({ eventType: 'order.created' }),
+          payment: expect.objectContaining({ status: 'pending', transactionId: null }),
+          outbox: null,
         }),
       );
 
-      // The reservation id doubles as the provider idempotency key, so a retried
-      // capture cannot charge twice.
+      // The provider key is the order id, so a resumed attempt re-charges nothing.
       expect(mockPaymentsService.processPayment).toHaveBeenCalledWith(
         'mock',
         160,
-        expect.stringMatching(/^[0-9a-f-]{36}$/),
+        'order-123',
       );
+      expect(mockRepository.createOrder.mock.invocationCallOrder[0]).toBeLessThan(
+        mockPaymentsService.processPayment.mock.invocationCallOrder[0],
+      );
+
+      // TX2 — the confirmation carries the capture and the outbox event.
+      expect(mockRepository.confirmOrder).toHaveBeenCalledWith(
+        'order-123',
+        { transactionId: 'mock_tx_123' },
+        expect.objectContaining({ eventType: 'order.created' }),
+      );
+
+      const outbox = mockRepository.confirmOrder.mock.calls[0][2] as OutboxWrite;
+      expect(
+        outbox.payload({ orderId: 'order-123', orderNumber: '#2026-123456' }),
+      ).toMatchObject({
+        orderId: 'order-123',
+        orderNumber: '#2026-123456',
+        userId: USER_ID,
+        grandTotal: 160,
+        itemsCount: 1,
+        reservationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      });
+    });
+
+    it('closes the attempt as failed and releases the hold when the capture is declined', async () => {
+      mockPaymentsService.processPayment.mockResolvedValueOnce({
+        success: false,
+        errorMessage: 'Declined by issuer',
+      });
+
+      const error = await rejection(service.checkout(USER_ID, KEY, createSampleDto()));
+
+      expect(error.getStatus()).toBe(HttpStatus.PAYMENT_REQUIRED);
+      expect(error.getResponse()).toMatchObject({ code: 'PAYMENT_FAILED' });
+      expect(mockRepository.failOrder).toHaveBeenCalledWith(
+        'order-123',
+        expect.any(String),
+        'failed',
+      );
+      expect(mockRepository.confirmOrder).not.toHaveBeenCalled();
+      expect(mockCatalogClient.releaseStock).toHaveBeenCalledTimes(1);
+      expect(mockPaymentsService.processRefund).not.toHaveBeenCalled();
+    });
+
+    it('leaves the attempt pending when the provider is unreachable, so a retry can resume', async () => {
+      mockPaymentsService.processPayment.mockRejectedValueOnce(
+        new Error('socket hang up'),
+      );
+
+      const error = await rejection(service.checkout(USER_ID, KEY, createSampleDto()));
+
+      expect(error.getStatus()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
+      expect(error.getResponse()).toMatchObject({ code: 'PAYMENT_UNAVAILABLE' });
+      // The hold must outlive the failure: a released hold under a pending order
+      // would let the resume confirm stock that is already gone.
+      expect(mockCatalogClient.releaseStock).not.toHaveBeenCalled();
+      expect(mockRepository.failOrder).not.toHaveBeenCalled();
+    });
+
+    it('fails closed with 503 and releases the hold when the order cannot be written', async () => {
+      mockRepository.createOrder.mockRejectedValueOnce(new Error('connection reset'));
+
+      const error = await rejection(service.checkout(USER_ID, KEY, createSampleDto()));
+
+      expect(error.getStatus()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
+      expect(error.getResponse()).toMatchObject({ code: 'CHECKOUT_UNAVAILABLE' });
+      expect(mockPaymentsService.processPayment).not.toHaveBeenCalled();
+      expect(mockCatalogClient.releaseStock).toHaveBeenCalledTimes(1);
+    });
+
+    it('refunds the capture, closes the order and releases the hold when TX2 fails', async () => {
+      mockRepository.confirmOrder.mockRejectedValueOnce(new Error('deadlock detected'));
+
+      const error = await rejection(service.checkout(USER_ID, KEY, createSampleDto()));
+
+      expect(error.getStatus()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
+      expect(error.getResponse()).toMatchObject({ code: 'PAYMENT_PERSIST_FAILED' });
+      expect(mockPaymentsService.processRefund).toHaveBeenCalledTimes(1);
+      expect(mockPaymentsService.processRefund).toHaveBeenCalledWith(
+        'mock_tx_123',
+        160,
+        expect.stringContaining('confirm'),
+      );
+      expect(mockRepository.failOrder).toHaveBeenCalledWith(
+        'order-123',
+        expect.any(String),
+        'refunded',
+      );
+      expect(mockCatalogClient.releaseStock).toHaveBeenCalledTimes(1);
+    });
+
+    it('resumes a pending attempt instead of refusing the retry', async () => {
+      mockRepository.findByIdempotencyKey.mockResolvedValue({
+        order: storedOrder({ status: 'pending', payment_status: 'pending' }),
+        items: [storedItem()],
+      });
+      mockRepository.findPendingPayment.mockResolvedValue(pendingPayment());
+
+      const result = await service.checkout(USER_ID, KEY, createSampleDto());
+
+      expect(result.status).toBe('confirmed');
+      expect(result.orderId).toBe('order-123');
+      // Same order, same hold, one capture: no new reservation and no new row.
+      expect(mockCatalogClient.reserveStock).not.toHaveBeenCalled();
+      expect(mockRepository.createOrder).not.toHaveBeenCalled();
+      expect(mockPaymentsService.processPayment).toHaveBeenCalledTimes(1);
+      expect(mockPaymentsService.processPayment).toHaveBeenCalledWith(
+        'mock',
+        160,
+        'order-123',
+      );
+      expect(mockRepository.confirmOrder).toHaveBeenCalledWith(
+        'order-123',
+        { transactionId: 'mock_tx_123' },
+        expect.objectContaining({ eventType: 'order.created' }),
+      );
+    });
+
+    it('closes a pending attempt whose payment row is gone', async () => {
+      mockRepository.findByIdempotencyKey.mockResolvedValue({
+        order: storedOrder({ status: 'pending', payment_status: 'pending' }),
+        items: [storedItem()],
+      });
+      mockRepository.findPendingPayment.mockResolvedValue(null);
+
+      const error = await rejection(service.checkout(USER_ID, KEY, createSampleDto()));
+
+      expect(error.getStatus()).toBe(HttpStatus.CONFLICT);
+      expect(error.getResponse()).toMatchObject({ code: 'ORDER_ATTEMPT_CLOSED' });
+      expect(mockPaymentsService.processPayment).not.toHaveBeenCalled();
     });
   });
 
@@ -439,18 +602,27 @@ describe('CheckoutService', () => {
       expect(mockRedis.del).toHaveBeenCalledWith(LOCK_KEY);
     });
 
-    it('releases the hold when the capture is declined', async () => {
+    it('closes the attempt as failed and releases the hold when the capture is declined on a resume', async () => {
+      mockRepository.findByIdempotencyKey.mockResolvedValue({
+        order: storedOrder({ status: 'pending', payment_status: 'pending' }),
+        items: [storedItem()],
+      });
+      mockRepository.findPendingPayment.mockResolvedValue(pendingPayment());
       mockPaymentsService.processPayment.mockResolvedValueOnce({
         success: false,
         errorMessage: 'Declined by issuer',
       });
 
-      await expect(
-        service.checkout(USER_ID, KEY, createSampleDto()),
-      ).rejects.toThrow(BadRequestException);
+      const error = await rejection(service.checkout(USER_ID, KEY, createSampleDto()));
 
+      expect(error.getStatus()).toBe(HttpStatus.PAYMENT_REQUIRED);
+      expect(error.getResponse()).toMatchObject({ code: 'PAYMENT_FAILED' });
+      expect(mockRepository.failOrder).toHaveBeenCalledWith(
+        'order-123',
+        expect.any(String),
+        'failed',
+      );
       expect(mockCatalogClient.releaseStock).toHaveBeenCalledTimes(1);
-      expect(mockRepository.createOrder).not.toHaveBeenCalled();
       expect(mockRedis.del).toHaveBeenCalledWith(LOCK_KEY);
     });
 
