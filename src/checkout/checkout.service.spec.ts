@@ -1,11 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { CheckoutService } from './checkout.service.js';
-import { RedisService } from '../redis/redis.service.js';
-import { CatalogClient } from '../clients/catalog.client.js';
-import { CartClient } from '../clients/cart.client.js';
-import { DiscountsService } from '../discounts/discounts.service.js';
-import { DiscountsRepository } from '../discounts/discounts.repository.js';
-import { PaymentsService } from '../payments/payments.service.js';
+import { createHash } from 'node:crypto';
 import {
   BadGatewayException,
   BadRequestException,
@@ -13,8 +6,21 @@ import {
   ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { CheckoutService } from './checkout.service.js';
+import { RedisService } from '../redis/redis.service.js';
+import { CatalogClient } from '../clients/catalog.client.js';
+import { CartClient } from '../clients/cart.client.js';
+import { DiscountsService } from '../discounts/discounts.service.js';
+import { PaymentsService } from '../payments/payments.service.js';
+import { canonicalJson } from '../common/canonical-json.js';
+import { CheckoutRepository, DuplicateIdempotencyKeyError } from './checkout.repository.js';
 import { CheckoutDto } from './dto/checkout.dto.js';
-import * as dbPool from '../db/pool.js';
+import type { OrderItemRow, OrderRow } from '../db/rows.js';
+
+const USER_ID = 'user-1';
+const KEY = 'key-123';
+const CACHE_KEY = `idem:${USER_ID}:checkout:${KEY}`;
+const LOCK_KEY = `${CACHE_KEY}:lock`;
 
 describe('CheckoutService', () => {
   let service: CheckoutService;
@@ -29,24 +35,15 @@ describe('CheckoutService', () => {
     releaseStock: ReturnType<typeof vi.fn>;
     getProductSnapshots: ReturnType<typeof vi.fn>;
   };
-  let mockCartClient: {
-    clearCart: ReturnType<typeof vi.fn>;
-  };
-  let mockDiscountsService: {
-    validate: ReturnType<typeof vi.fn>;
-  };
-  let mockDiscountsRepository: {
-    incrementUsesCount: ReturnType<typeof vi.fn>;
-  };
+  let mockCartClient: { clearCart: ReturnType<typeof vi.fn> };
+  let mockDiscountsService: { validate: ReturnType<typeof vi.fn> };
   let mockPaymentsService: {
     processPayment: ReturnType<typeof vi.fn>;
+    processRefund: ReturnType<typeof vi.fn>;
   };
-  let mockPoolClient: {
-    query: ReturnType<typeof vi.fn>;
-    release: ReturnType<typeof vi.fn>;
-  };
-  let mockPool: {
-    connect: ReturnType<typeof vi.fn>;
+  let mockRepository: {
+    findByIdempotencyKey: ReturnType<typeof vi.fn>;
+    createOrder: ReturnType<typeof vi.fn>;
   };
 
   const createSampleDto = (): CheckoutDto => ({
@@ -73,6 +70,80 @@ describe('CheckoutService', () => {
     },
   });
 
+  const bodyHashOf = (dto: CheckoutDto): string =>
+    createHash('sha256').update(canonicalJson(dto)).digest('hex');
+
+  const storedOrder = (overrides: Partial<OrderRow> = {}): OrderRow => ({
+    id: 'order-123',
+    user_id: USER_ID,
+    order_number: '#2026-123456',
+    status: 'confirmed',
+    subtotal: '160.00',
+    shipping_fee: '0.00',
+    tax: '0.00',
+    discount: '0.00',
+    grand_total: '160.00',
+    currency: 'USD',
+    payment_status: 'paid',
+    shipping_address: {
+      line1: '123 Main St',
+      city: 'Seattle',
+      postalCode: '98101',
+      country: 'US',
+    },
+    billing_address: {
+      line1: '123 Main St',
+      city: 'Seattle',
+      postalCode: '98101',
+      country: 'US',
+    },
+    discount_code_id: null,
+    stock_reservation_id: 'reservation-1',
+    idempotency_key: KEY,
+    idempotency_body_hash: bodyHashOf(createSampleDto()),
+    notes: null,
+    created_at: '2026-10-29T10:00:00Z',
+    updated_at: '2026-10-29T10:00:00Z',
+    ...overrides,
+  });
+
+  const storedItem = (): OrderItemRow => ({
+    id: 'item-1',
+    order_id: 'order-123',
+    product_id: '018f0000-0000-7000-8000-000000000101',
+    variant_id: null,
+    product_name: 'Running Shoe Pro',
+    sku: 'RSP-BLK-42',
+    unit_price: '80.00',
+    qty: 2,
+    line_total: '160.00',
+    options: null,
+  });
+
+  const cachedPayload = (
+    dto: CheckoutDto,
+    overrides: Partial<{ bodyHash: string; orderId: string }> = {},
+  ): string =>
+    JSON.stringify({
+      bodyHash: overrides.bodyHash ?? bodyHashOf(dto),
+      response: {
+        orderId: overrides.orderId ?? 'order-123',
+        orderNumber: '#2026-123456',
+        status: 'confirmed',
+        totals: { subtotal: 160, shipping: 0, tax: 0, discount: 0, grandTotal: 160 },
+        items: [
+          {
+            productId: '018f0000-0000-7000-8000-000000000101',
+            productName: 'Running Shoe Pro',
+            sku: 'RSP-BLK-42',
+            unitPrice: 80,
+            qty: 2,
+            lineTotal: 160,
+          },
+        ],
+      },
+    });
+
   beforeEach(() => {
     mockRedis = {
       get: vi.fn().mockResolvedValue(null),
@@ -97,19 +168,29 @@ describe('CheckoutService', () => {
         ],
       }),
       releaseStock: vi.fn().mockResolvedValue({ ok: true, status: 'released' }),
-      getProductSnapshots: vi.fn().mockResolvedValue(new Map()),
+      getProductSnapshots: vi.fn().mockResolvedValue(
+        new Map([
+          [
+            '018f0000-0000-7000-8000-000000000101',
+            {
+              productId: '018f0000-0000-7000-8000-000000000101',
+              variantId: null,
+              productName: 'Running Shoe Pro',
+              sku: 'RSP-BLK-42',
+              unitPrice: 80,
+              effectivePrice: 80,
+              available: true,
+              stock: 25,
+            },
+          ],
+        ]),
+      ),
     };
 
-    mockCartClient = {
-      clearCart: vi.fn().mockResolvedValue(undefined),
-    };
+    mockCartClient = { clearCart: vi.fn().mockResolvedValue(undefined) };
 
     mockDiscountsService = {
       validate: vi.fn().mockResolvedValue({ valid: true, discount: 10, id: 'coupon-1' }),
-    };
-
-    mockDiscountsRepository = {
-      incrementUsesCount: vi.fn().mockResolvedValue(true),
     };
 
     mockPaymentsService = {
@@ -117,168 +198,293 @@ describe('CheckoutService', () => {
         success: true,
         transactionId: 'mock_tx_123',
       }),
+      processRefund: vi.fn().mockResolvedValue({ success: true, transactionId: 'mock_ref_123' }),
     };
 
-    mockPoolClient = {
-      query: vi.fn().mockResolvedValue({ rows: [{ id: 'order-123' }] }),
-      release: vi.fn(),
+    mockRepository = {
+      findByIdempotencyKey: vi.fn().mockResolvedValue(null),
+      createOrder: vi
+        .fn()
+        .mockResolvedValue({ orderId: 'order-123', orderNumber: '#2026-123456' }),
     };
-
-    mockPool = {
-      connect: vi.fn().mockResolvedValue(mockPoolClient),
-    };
-
-    vi.spyOn(dbPool, 'getPool').mockReturnValue(mockPool as any);
 
     service = new CheckoutService(
       mockRedis as unknown as RedisService,
       mockCatalogClient as unknown as CatalogClient,
       mockCartClient as unknown as CartClient,
       mockDiscountsService as unknown as DiscountsService,
-      mockDiscountsRepository as unknown as DiscountsRepository,
       mockPaymentsService as unknown as PaymentsService,
+      mockRepository as unknown as CheckoutRepository,
     );
   });
 
-  it('throws BadRequestException if idempotency key is missing', async () => {
-    await expect(
-      service.checkout('user-1', '', createSampleDto()),
-    ).rejects.toThrow(BadRequestException);
-  });
+  describe('idempotency guard', () => {
+    it('scopes the cache key by user and route', async () => {
+      await service.checkout(USER_ID, KEY, createSampleDto());
 
-  it('returns cached response immediately on idempotency hit with matching payload', async () => {
-    const cachedResponse = {
-      orderId: 'cached-order-1',
-      orderNumber: '#2026-999999',
-      status: 'confirmed',
-      totals: { subtotal: 100, shipping: 0, tax: 0, discount: 0, grandTotal: 100 },
-      items: [],
-    };
-
-    // Calculate exact hash for the dto
-    const { createHash } = await import('node:crypto');
-    const dto = createSampleDto();
-    const bodyHash = createHash('sha256').update(JSON.stringify(dto)).digest('hex');
-
-    mockRedis.get.mockResolvedValueOnce(
-      JSON.stringify({ bodyHash, response: cachedResponse }),
-    );
-
-    const result = await service.checkout('user-1', 'key-123', dto);
-    expect(result).toEqual(cachedResponse);
-    expect(mockCatalogClient.reserveStock).not.toHaveBeenCalled();
-    expect(mockPaymentsService.processPayment).not.toHaveBeenCalled();
-  });
-
-  it('throws ConflictException on idempotency conflict with mismatched payload', async () => {
-    mockRedis.get.mockResolvedValueOnce(
-      JSON.stringify({ bodyHash: 'different-hash', response: {} }),
-    );
-
-    await expect(
-      service.checkout('user-1', 'key-123', createSampleDto()),
-    ).rejects.toThrow(ConflictException);
-  });
-
-  it('throws ConflictException when stock reservation in catalog-svc fails', async () => {
-    mockCatalogClient.reserveStock.mockResolvedValueOnce({
-      ok: false,
-      failure: 'insufficient_stock',
-      code: 'INSUFFICIENT_STOCK',
-      message: 'Insufficient stock for product 018f0000-…',
+      expect(mockRedis.get).toHaveBeenCalledWith(CACHE_KEY);
+      expect(mockRedis.setnx).toHaveBeenCalledWith(LOCK_KEY, 'processing', 60);
+      expect(mockRedis.set).toHaveBeenCalledWith(
+        CACHE_KEY,
+        expect.any(String),
+        86_400,
+      );
     });
 
-    await expect(
-      service.checkout('user-1', 'key-123', createSampleDto()),
-    ).rejects.toThrow(ConflictException);
+    it('replays the cached response when the order row confirms it', async () => {
+      const dto = createSampleDto();
+      mockRedis.get.mockResolvedValue(cachedPayload(dto));
+      mockRepository.findByIdempotencyKey.mockResolvedValue({
+        order: storedOrder(),
+        items: [storedItem()],
+      });
 
-    expect(mockRedis.del).toHaveBeenCalledWith('idem:key-123:lock');
-    expect(mockPaymentsService.processPayment).not.toHaveBeenCalled();
-  });
+      const result = await service.checkout(USER_ID, KEY, dto);
 
-  it('reports contract drift as 502 and a dead catalog as 503', async () => {
-    mockCatalogClient.reserveStock.mockResolvedValueOnce({
-      ok: false,
-      failure: 'invalid_request',
-      message: 'property quantity should not exist',
-    });
-    await expect(
-      service.checkout('user-1', 'key-123', createSampleDto()),
-    ).rejects.toThrow(BadGatewayException);
-
-    mockCatalogClient.reserveStock.mockResolvedValueOnce({
-      ok: false,
-      failure: 'unavailable',
-      message: 'Unable to reach catalog service',
-    });
-    await expect(
-      service.checkout('user-1', 'key-123', createSampleDto()),
-    ).rejects.toThrow(ServiceUnavailableException);
-  });
-
-  it('sends quantity (not qty) and keeps the reservation id on the order', async () => {
-    await service.checkout('user-1', 'key-123', createSampleDto());
-
-    const [reservationId, items] = mockCatalogClient.reserveStock.mock
-      .calls[0] as unknown as [string, Array<Record<string, unknown>>];
-    expect(reservationId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(items[0]).toEqual({
-      productId: '018f0000-0000-7000-8000-000000000101',
-      variantId: null,
-      quantity: 2,
-    });
-    expect(items[0]).not.toHaveProperty('qty');
-
-    const orderInsert = mockPoolClient.query.mock.calls.find(([sql]) =>
-      String(sql).includes('INSERT INTO "order".orders'),
-    ) as [string, unknown[]];
-    expect(orderInsert[0]).toContain('stock_reservation_id');
-    expect(orderInsert[1]).toContain(reservationId);
-  });
-
-  it('compensates and releases stock when discount coupon is invalid', async () => {
-    const dto = createSampleDto();
-    dto.discountCode = 'INVALIDCODE';
-
-    mockDiscountsService.validate.mockResolvedValueOnce({
-      valid: false,
-      message: 'Discount code has expired',
+      expect(result.orderId).toBe('order-123');
+      expect(mockRepository.createOrder).not.toHaveBeenCalled();
+      expect(mockCatalogClient.reserveStock).not.toHaveBeenCalled();
     });
 
-    await expect(
-      service.checkout('user-1', 'key-123', dto),
-    ).rejects.toThrow(UnprocessableEntityException);
+    it('rejects a cached key reused with a different body', async () => {
+      const dto = createSampleDto();
+      mockRedis.get.mockResolvedValue(cachedPayload(dto, { bodyHash: 'a'.repeat(64) }));
 
-    expect(mockCatalogClient.releaseStock).toHaveBeenCalled();
-    expect(mockRedis.del).toHaveBeenCalledWith('idem:key-123:lock');
-    expect(mockPaymentsService.processPayment).not.toHaveBeenCalled();
-  });
-
-  it('compensates and releases stock when payment capture fails', async () => {
-    mockPaymentsService.processPayment.mockResolvedValueOnce({
-      success: false,
-      errorMessage: 'Declined by issuer',
+      await expect(service.checkout(USER_ID, KEY, dto)).rejects.toThrow(
+        ConflictException,
+      );
+      expect(mockCatalogClient.reserveStock).not.toHaveBeenCalled();
     });
 
-    await expect(
-      service.checkout('user-1', 'key-123', createSampleDto()),
-    ).rejects.toThrow(BadRequestException);
+    it('treats an unparseable cache entry as a miss instead of failing or continuing blindly', async () => {
+      const dto = createSampleDto();
+      mockRedis.get.mockResolvedValue('{not json');
 
-    expect(mockCatalogClient.releaseStock).toHaveBeenCalled();
-    expect(mockRedis.del).toHaveBeenCalledWith('idem:key-123:lock');
+      const result = await service.checkout(USER_ID, KEY, dto);
+
+      expect(result.orderId).toBe('order-123');
+      expect(mockRepository.findByIdempotencyKey).toHaveBeenCalledWith(USER_ID, KEY);
+      expect(mockRepository.createOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores a cache entry whose order row no longer exists', async () => {
+      const dto = createSampleDto();
+      mockRedis.get.mockResolvedValue(cachedPayload(dto));
+      mockRepository.findByIdempotencyKey.mockResolvedValue(null);
+
+      await service.checkout(USER_ID, KEY, dto);
+
+      expect(mockRepository.createOrder).toHaveBeenCalledTimes(1);
+    });
+
+    it('replays from the database when the cache is empty', async () => {
+      mockRepository.findByIdempotencyKey.mockResolvedValue({
+        order: storedOrder(),
+        items: [storedItem()],
+      });
+
+      const result = await service.checkout(USER_ID, KEY, createSampleDto());
+
+      expect(result.orderId).toBe('order-123');
+      expect(result.totals.grandTotal).toBe(160);
+      expect(result.items[0].sku).toBe('RSP-BLK-42');
+      expect(mockCatalogClient.reserveStock).not.toHaveBeenCalled();
+    });
+
+    it('rejects a key whose attempt already ended as failed', async () => {
+      mockRepository.findByIdempotencyKey.mockResolvedValue({
+        order: storedOrder({ status: 'failed' }),
+        items: [storedItem()],
+      });
+
+      await expect(
+        service.checkout(USER_ID, KEY, createSampleDto()),
+      ).rejects.toThrow(ConflictException);
+      expect(mockCatalogClient.reserveStock).not.toHaveBeenCalled();
+    });
+
+    it('rejects a stored attempt with a different body hash', async () => {
+      mockRepository.findByIdempotencyKey.mockResolvedValue({
+        order: storedOrder({ idempotency_body_hash: 'b'.repeat(64) }),
+        items: [storedItem()],
+      });
+
+      await expect(
+        service.checkout(USER_ID, KEY, createSampleDto()),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('fails closed with 503 when the cache read errors', async () => {
+      mockRedis.get.mockRejectedValue(new Error('ECONNREFUSED'));
+
+      await expect(
+        service.checkout(USER_ID, KEY, createSampleDto()),
+      ).rejects.toThrow(ServiceUnavailableException);
+      expect(mockCatalogClient.reserveStock).not.toHaveBeenCalled();
+      expect(mockRepository.createOrder).not.toHaveBeenCalled();
+    });
+
+    it('fails closed with 503 when the lock cannot be taken because redis is down', async () => {
+      mockRedis.setnx.mockRejectedValue(new Error('ECONNREFUSED'));
+
+      await expect(
+        service.checkout(USER_ID, KEY, createSampleDto()),
+      ).rejects.toThrow(ServiceUnavailableException);
+      expect(mockCatalogClient.reserveStock).not.toHaveBeenCalled();
+    });
+
+    it('rejects a concurrent duplicate with 409 while another attempt holds the lock', async () => {
+      mockRedis.setnx.mockResolvedValue(false);
+
+      await expect(
+        service.checkout(USER_ID, KEY, createSampleDto()),
+      ).rejects.toThrow(ConflictException);
+      expect(mockPaymentsService.processPayment).not.toHaveBeenCalled();
+    });
+
+    it('still returns the order when the post-commit cache write fails', async () => {
+      mockRedis.set.mockRejectedValue(new Error('READONLY replica'));
+
+      const result = await service.checkout(USER_ID, KEY, createSampleDto());
+
+      expect(result.orderId).toBe('order-123');
+      expect(result.status).toBe('confirmed');
+    });
+
+    it('serves the winner and compensates the losing attempt on a duplicate-key race', async () => {
+      mockRepository.createOrder.mockRejectedValueOnce(
+        new DuplicateIdempotencyKeyError(KEY),
+      );
+      mockRepository.findByIdempotencyKey
+        .mockResolvedValueOnce(null)
+        .mockResolvedValue({ order: storedOrder(), items: [storedItem()] });
+
+      const result = await service.checkout(USER_ID, KEY, createSampleDto());
+
+      expect(result.orderId).toBe('order-123');
+      expect(mockPaymentsService.processRefund).toHaveBeenCalledWith(
+        'mock_tx_123',
+        expect.any(Number),
+        expect.stringContaining('persist'),
+      );
+      expect(mockCatalogClient.releaseStock).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases the lock on every path', async () => {
+      mockCatalogClient.reserveStock.mockResolvedValueOnce({
+        ok: false,
+        failure: 'insufficient_stock',
+        code: 'INSUFFICIENT_STOCK',
+        message: 'no stock',
+      });
+
+      await expect(
+        service.checkout(USER_ID, KEY, createSampleDto()),
+      ).rejects.toThrow(ConflictException);
+      expect(mockRedis.del).toHaveBeenCalledWith(LOCK_KEY);
+    });
   });
 
-  it('completes full checkout atomically, caches in redis, and returns confirmation', async () => {
-    const dto = createSampleDto();
-    const result = await service.checkout('user-1', 'key-123', dto);
+  describe('happy path', () => {
+    it('persists the order with the key, the body hash and the hold', async () => {
+      const dto = createSampleDto();
+      const result = await service.checkout(USER_ID, KEY, dto);
 
-    expect(result.orderId).toBe('order-123');
-    expect(result.status).toBe('confirmed');
-    expect(result.orderNumber).toMatch(/^#2026-\d{6}$/);
+      expect(result.orderId).toBe('order-123');
+      expect(result.status).toBe('confirmed');
+      expect(result.orderNumber).toMatch(/^#2026-\d{6}$/);
 
-    expect(mockPoolClient.query).toHaveBeenCalledWith('BEGIN');
-    expect(mockPoolClient.query).toHaveBeenCalledWith('COMMIT');
-    expect(mockRedis.set).toHaveBeenCalled();
-    expect(mockRedis.del).toHaveBeenCalledWith('idem:key-123:lock');
+      expect(mockRepository.createOrder).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: USER_ID,
+          status: 'confirmed',
+          paymentStatus: 'paid',
+          idempotencyKey: KEY,
+          idempotencyBodyHash: bodyHashOf(dto),
+          stockReservationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+          grandTotal: 160,
+          payment: expect.objectContaining({
+            status: 'captured',
+            transactionId: 'mock_tx_123',
+          }),
+          outbox: expect.objectContaining({ eventType: 'order.created' }),
+        }),
+      );
+
+      // The reservation id doubles as the provider idempotency key, so a retried
+      // capture cannot charge twice.
+      expect(mockPaymentsService.processPayment).toHaveBeenCalledWith(
+        'mock',
+        160,
+        expect.stringMatching(/^[0-9a-f-]{36}$/),
+      );
+    });
+  });
+
+  describe('compensation', () => {
+    it('releases the hold when the coupon is rejected', async () => {
+      const dto = createSampleDto();
+      dto.discountCode = 'INVALIDCODE';
+      mockDiscountsService.validate.mockResolvedValueOnce({
+        valid: false,
+        message: 'Discount code has expired',
+      });
+
+      await expect(service.checkout(USER_ID, KEY, dto)).rejects.toThrow(
+        UnprocessableEntityException,
+      );
+
+      expect(mockCatalogClient.releaseStock).toHaveBeenCalledTimes(1);
+      expect(mockPaymentsService.processPayment).not.toHaveBeenCalled();
+      expect(mockRedis.del).toHaveBeenCalledWith(LOCK_KEY);
+    });
+
+    it('releases the hold when the capture is declined', async () => {
+      mockPaymentsService.processPayment.mockResolvedValueOnce({
+        success: false,
+        errorMessage: 'Declined by issuer',
+      });
+
+      await expect(
+        service.checkout(USER_ID, KEY, createSampleDto()),
+      ).rejects.toThrow(BadRequestException);
+
+      expect(mockCatalogClient.releaseStock).toHaveBeenCalledTimes(1);
+      expect(mockRepository.createOrder).not.toHaveBeenCalled();
+      expect(mockRedis.del).toHaveBeenCalledWith(LOCK_KEY);
+    });
+
+    it('maps a catalog contract failure to 502 and a dead catalog to 503', async () => {
+      mockCatalogClient.reserveStock.mockResolvedValueOnce({
+        ok: false,
+        failure: 'invalid_request',
+        message: '{qty} is not part of the contract',
+      });
+      await expect(
+        service.checkout(USER_ID, KEY, createSampleDto()),
+      ).rejects.toThrow(BadGatewayException);
+
+      mockCatalogClient.reserveStock.mockResolvedValueOnce({
+        ok: false,
+        failure: 'unavailable',
+        message: 'Unable to reach catalog service',
+      });
+      await expect(
+        service.checkout(USER_ID, KEY, createSampleDto()),
+      ).rejects.toThrow(ServiceUnavailableException);
+    });
+
+    it('does not release anything when the hold was never taken', async () => {
+      mockCatalogClient.reserveStock.mockResolvedValueOnce({
+        ok: false,
+        failure: 'unavailable',
+        message: 'Unable to reach catalog service',
+      });
+
+      await expect(
+        service.checkout(USER_ID, KEY, createSampleDto()),
+      ).rejects.toThrow(ServiceUnavailableException);
+      expect(mockCatalogClient.releaseStock).not.toHaveBeenCalled();
+    });
   });
 });
