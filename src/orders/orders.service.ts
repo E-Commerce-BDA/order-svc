@@ -2,10 +2,12 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { OrdersRepository, type OrderWithDetails } from './orders.repository.js';
 import { assertValidTransition } from './order-state-machine.js';
+import { CatalogClient } from '../clients/catalog.client.js';
 import type { OrderRow, OrderStatusHistoryRow } from '../db/rows.js';
 import type {
   AdminOrderQueryDto,
@@ -21,7 +23,12 @@ export interface UserContext {
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly ordersRepository: OrdersRepository) {}
+  private readonly logger = new Logger(OrdersService.name);
+
+  constructor(
+    private readonly ordersRepository: OrdersRepository,
+    private readonly catalogClient: CatalogClient,
+  ) {}
 
   /**
    * Retrieves customer order history with cursor pagination.
@@ -82,6 +89,9 @@ export class OrdersService {
 
   /**
    * Admin order status update enforcing the finite state machine.
+   *
+   * A terminal state gives the stock back: the hold was taken for an order that
+   * will never ship, and only the order row knows which hold it is.
    */
   async updateStatus(
     orderId: string,
@@ -95,13 +105,38 @@ export class OrdersService {
 
     assertValidTransition(order.status, dto.status);
 
-    return this.ordersRepository.updateStatusWithHistory(
+    const updated = await this.ordersRepository.updateStatusWithHistory(
       orderId,
       order.status,
       dto.status,
       dto.note ?? null,
       actor,
     );
+
+    // After the state change commits: a release that fails is a warning, because
+    // the reservation expires on its own and the order is already correct.
+    if (updated.status === 'cancelled' || updated.status === 'failed') {
+      await this.releaseHold(updated.stock_reservation_id);
+    }
+
+    return updated;
+  }
+
+  private async releaseHold(reservationId: string | null): Promise<void> {
+    if (!reservationId) return;
+
+    try {
+      const released = await this.catalogClient.releaseStock(reservationId);
+      if (!released.ok) {
+        this.logger.warn(
+          `Release of hold ${reservationId} failed (${released.message}); the hold will expire`,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Release of hold ${reservationId} threw: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**

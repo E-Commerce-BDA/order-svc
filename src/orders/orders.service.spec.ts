@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { BadRequestException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { OrdersService } from './orders.service.js';
 import { OrdersRepository, type OrderWithDetails } from './orders.repository.js';
+import { CatalogClient } from '../clients/catalog.client.js';
 import {
   assertValidTransition,
   canTransition,
@@ -43,6 +44,7 @@ describe('Order State Machine', () => {
 describe('OrdersService', () => {
   let service: OrdersService;
   let repo: Partial<Record<keyof OrdersRepository, ReturnType<typeof vi.fn>>>;
+  let catalog: { releaseStock: ReturnType<typeof vi.fn> };
 
   const sampleOrder: OrderWithDetails = {
     id: 'ord-123',
@@ -89,7 +91,11 @@ describe('OrdersService', () => {
       updateStatusWithHistory: vi.fn(),
       refundOrderWithHistory: vi.fn(),
     };
-    service = new OrdersService(repo as unknown as OrdersRepository);
+    catalog = { releaseStock: vi.fn().mockResolvedValue({ ok: true, status: 'released' }) };
+    service = new OrdersService(
+      repo as unknown as OrdersRepository,
+      catalog as unknown as CatalogClient,
+    );
   });
 
   describe('findOrderById authorization', () => {
@@ -169,6 +175,52 @@ describe('OrdersService', () => {
         ),
       ).rejects.toThrow(BadRequestException);
       expect(repo.updateStatusWithHistory).not.toHaveBeenCalled();
+    });
+
+    it('releases the stock hold once the cancellation has committed', async () => {
+      const heldOrder = {
+        ...sampleOrder,
+        status: 'confirmed' as const,
+        stock_reservation_id: 'reservation-1',
+      };
+      repo.findOrderById!.mockResolvedValue(heldOrder);
+      repo.updateStatusWithHistory!.mockResolvedValue({ ...heldOrder, status: 'cancelled' });
+
+      await service.updateStatus('ord-123', { status: 'cancelled' }, 'admin-1');
+
+      expect(catalog.releaseStock).toHaveBeenCalledWith('reservation-1');
+      expect(repo.updateStatusWithHistory!.mock.invocationCallOrder[0]).toBeLessThan(
+        catalog.releaseStock.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('does not release a hold for a non-terminal transition', async () => {
+      const heldOrder = {
+        ...sampleOrder,
+        status: 'confirmed' as const,
+        stock_reservation_id: 'reservation-1',
+      };
+      repo.findOrderById!.mockResolvedValue(heldOrder);
+      repo.updateStatusWithHistory!.mockResolvedValue({ ...heldOrder, status: 'processing' });
+
+      await service.updateStatus('ord-123', { status: 'processing' }, 'admin-1');
+
+      expect(catalog.releaseStock).not.toHaveBeenCalled();
+    });
+
+    it('still returns the order when the hold cannot be released', async () => {
+      const heldOrder = {
+        ...sampleOrder,
+        status: 'confirmed' as const,
+        stock_reservation_id: 'reservation-1',
+      };
+      repo.findOrderById!.mockResolvedValue(heldOrder);
+      repo.updateStatusWithHistory!.mockResolvedValue({ ...heldOrder, status: 'cancelled' });
+      catalog.releaseStock.mockRejectedValueOnce(new Error('catalog is down'));
+
+      const res = await service.updateStatus('ord-123', { status: 'cancelled' }, 'admin-1');
+
+      expect(res.status).toBe('cancelled');
     });
   });
 
