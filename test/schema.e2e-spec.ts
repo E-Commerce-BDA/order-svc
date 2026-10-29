@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
@@ -23,24 +23,22 @@ describe('Order Schema & Fixtures (e2e)', () => {
   beforeAll(async () => {
     pool = getPool();
 
-    const schemaSql = readFileSync(
-      join(__dirname, '../db/001-order-schema.sql'),
-      'utf-8',
-    );
-    await pool.query(schemaSql);
-
-    const seedSql = readFileSync(
-      join(__dirname, '../db/002-seed-orders.sql'),
-      'utf-8',
-    );
-    await pool.query(seedSql);
+    // Every migration in filename order: a new db/NNN file has to reach this spec
+    // without an edit here, otherwise the schema assertions silently go stale.
+    const dbDir = join(__dirname, '../db');
+    const migrations = readdirSync(dbDir)
+      .filter((file) => file.endsWith('.sql'))
+      .sort();
+    for (const migration of migrations) {
+      await pool.query(readFileSync(join(dbDir, migration), 'utf-8'));
+    }
   });
 
   afterAll(async () => {
     await closePool();
   });
 
-  it('proves all 7 tables exist in schema "order"', async () => {
+  it('proves all 8 tables exist in schema "order"', async () => {
     const { rows } = await pool.query<{ table_name: string }>(
       `SELECT table_name FROM information_schema.tables 
        WHERE table_schema = 'order' 
@@ -55,6 +53,22 @@ describe('Order Schema & Fixtures (e2e)', () => {
     expect(tables).toContain('outbox');
     expect(tables).toContain('discount_codes');
     expect(tables).toContain('shipments');
+    expect(tables).toContain('refunds');
+  });
+
+  it('guards one refund per order with a unique order_id', async () => {
+    const { rows } = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE schemaname = 'order' AND tablename = 'refunds';`,
+    );
+    expect(rows.length).toBeGreaterThan(0);
+
+    const constraints = await pool.query<{ constraint_type: string }>(
+      `SELECT constraint_type FROM information_schema.table_constraints
+       WHERE table_schema = 'order' AND table_name = 'refunds'
+         AND constraint_type = 'UNIQUE';`,
+    );
+    expect(constraints.rows.length).toBe(1);
   });
 
   it('verifies seed discount codes exist with expected constraints', async () => {
