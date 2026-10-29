@@ -70,6 +70,8 @@ describe('OrdersService', () => {
     },
     discount_code_id: null,
     stock_reservation_id: null,
+    idempotency_key: null,
+    idempotency_body_hash: null,
     notes: null,
     created_at: '2026-10-27T10:00:00Z',
     updated_at: '2026-10-27T10:00:00Z',
