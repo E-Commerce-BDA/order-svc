@@ -7,8 +7,10 @@ import { DiscountsService } from '../discounts/discounts.service.js';
 import { DiscountsRepository } from '../discounts/discounts.repository.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import {
+  BadGatewayException,
   BadRequestException,
   ConflictException,
+  ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { CheckoutDto } from './dto/checkout.dto.js';
@@ -80,8 +82,21 @@ describe('CheckoutService', () => {
     };
 
     mockCatalogClient = {
-      reserveStock: vi.fn().mockResolvedValue({ success: true, reservedItems: 2 }),
-      releaseStock: vi.fn().mockResolvedValue({ success: true, releasedCount: 2 }),
+      reserveStock: vi.fn().mockResolvedValue({
+        ok: true,
+        reservationId: 'reservation-1',
+        status: 'held',
+        expiresAt: new Date(Date.now() + 900_000).toISOString(),
+        items: [
+          {
+            productId: '018f0000-0000-7000-8000-000000000101',
+            variantId: null,
+            quantity: 2,
+            remainingStock: 8,
+          },
+        ],
+      }),
+      releaseStock: vi.fn().mockResolvedValue({ ok: true, status: 'released' }),
       getProductSnapshots: vi.fn().mockResolvedValue(new Map()),
     };
 
@@ -167,8 +182,10 @@ describe('CheckoutService', () => {
 
   it('throws ConflictException when stock reservation in catalog-svc fails', async () => {
     mockCatalogClient.reserveStock.mockResolvedValueOnce({
-      success: false,
-      errorMessage: 'One or more items are out of stock',
+      ok: false,
+      failure: 'insufficient_stock',
+      code: 'INSUFFICIENT_STOCK',
+      message: 'Insufficient stock for product 018f0000-…',
     });
 
     await expect(
@@ -177,6 +194,46 @@ describe('CheckoutService', () => {
 
     expect(mockRedis.del).toHaveBeenCalledWith('idem:key-123:lock');
     expect(mockPaymentsService.processPayment).not.toHaveBeenCalled();
+  });
+
+  it('reports contract drift as 502 and a dead catalog as 503', async () => {
+    mockCatalogClient.reserveStock.mockResolvedValueOnce({
+      ok: false,
+      failure: 'invalid_request',
+      message: 'property quantity should not exist',
+    });
+    await expect(
+      service.checkout('user-1', 'key-123', createSampleDto()),
+    ).rejects.toThrow(BadGatewayException);
+
+    mockCatalogClient.reserveStock.mockResolvedValueOnce({
+      ok: false,
+      failure: 'unavailable',
+      message: 'Unable to reach catalog service',
+    });
+    await expect(
+      service.checkout('user-1', 'key-123', createSampleDto()),
+    ).rejects.toThrow(ServiceUnavailableException);
+  });
+
+  it('sends quantity (not qty) and keeps the reservation id on the order', async () => {
+    await service.checkout('user-1', 'key-123', createSampleDto());
+
+    const [reservationId, items] = mockCatalogClient.reserveStock.mock
+      .calls[0] as unknown as [string, Array<Record<string, unknown>>];
+    expect(reservationId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(items[0]).toEqual({
+      productId: '018f0000-0000-7000-8000-000000000101',
+      variantId: null,
+      quantity: 2,
+    });
+    expect(items[0]).not.toHaveProperty('qty');
+
+    const orderInsert = mockPoolClient.query.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO "order".orders'),
+    ) as [string, unknown[]];
+    expect(orderInsert[0]).toContain('stock_reservation_id');
+    expect(orderInsert[1]).toContain(reservationId);
   });
 
   it('compensates and releases stock when discount coupon is invalid', async () => {

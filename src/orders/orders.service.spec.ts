@@ -69,6 +69,7 @@ describe('OrdersService', () => {
       country: 'US',
     },
     discount_code_id: null,
+    stock_reservation_id: null,
     notes: null,
     created_at: '2026-10-27T10:00:00Z',
     updated_at: '2026-10-27T10:00:00Z',
