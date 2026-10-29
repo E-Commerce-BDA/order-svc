@@ -106,6 +106,23 @@ export interface PaymentRow {
   updated_at: string;
 }
 
+/** One refund per order in v1; the row is also the retry slot. */
+export type RefundStatus = 'pending' | 'succeeded' | 'failed';
+
+export interface RefundRow {
+  id: string;
+  order_id: string;
+  payment_id: string;
+  amount: string;
+  status: RefundStatus;
+  provider_reference: string | null;
+  failure_reason: string | null;
+  reason: string | null;
+  requested_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
 export type OutboxStatus = 'pending' | 'published' | 'failed';
 
 export interface OutboxRow {
