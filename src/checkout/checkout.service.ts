@@ -150,7 +150,8 @@ export class CheckoutService {
       }
 
       await this.cacheResponse(cacheKey, bodyHash, confirmation);
-      this.cartClient.clearCart(userId).catch(() => {});
+      // Phase-0 bridge until ca-009; must never fail the confirmation.
+      this.cartClient.convertCart(userId).catch(() => {});
 
       return confirmation;
     } finally {

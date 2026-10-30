@@ -40,7 +40,7 @@ describe('CheckoutService', () => {
     releaseStock: ReturnType<typeof vi.fn>;
     getProductSnapshots: ReturnType<typeof vi.fn>;
   };
-  let mockCartClient: { clearCart: ReturnType<typeof vi.fn> };
+  let mockCartClient: { convertCart: ReturnType<typeof vi.fn> };
   let mockDiscountsService: { validate: ReturnType<typeof vi.fn> };
   let mockPaymentsService: {
     processPayment: ReturnType<typeof vi.fn>;
@@ -219,7 +219,7 @@ describe('CheckoutService', () => {
       ),
     };
 
-    mockCartClient = { clearCart: vi.fn().mockResolvedValue(undefined) };
+    mockCartClient = { convertCart: vi.fn().mockResolvedValue(undefined) };
 
     mockDiscountsService = {
       validate: vi.fn().mockResolvedValue({ valid: true, discount: 10, id: 'coupon-1' }),
