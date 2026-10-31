@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
 import { getPool } from '../db/pool.js';
+import { OrderOutbox } from '../outbox/order-outbox.js';
 import type { OrderRow, PaymentRow, RefundRow } from '../db/rows.js';
 
 export interface StartRefundInput {
@@ -23,6 +23,8 @@ export interface RefundSettlement {
  */
 @Injectable()
 export class RefundsRepository {
+  constructor(private readonly outbox: OrderOutbox) {}
+
   async findByOrderId(orderId: string): Promise<RefundRow | null> {
     const { rows } = await getPool().query<RefundRow>(
       `SELECT * FROM "order".refunds WHERE order_id = $1 LIMIT 1;`,
@@ -137,27 +139,16 @@ export class RefundsRepository {
         ],
       );
 
-      await client.query(
-        `INSERT INTO "order".outbox (
-          event_id, aggregate_type, aggregate_id, event_type, payload
-        ) VALUES ($1, $2, $3, $4, $5);`,
-        [
-          randomUUID(),
-          'order',
-          order.id,
-          'order.status.updated',
-          JSON.stringify({
-            orderId: order.id,
-            orderNumber: order.order_number,
-            from: previousStatus,
-            to: 'refunded',
-            refundAmount: refund.amount,
-            refundReference: providerReference,
-            actor: refund.requested_by,
-            timestamp: new Date().toISOString(),
-          }),
-        ],
-      );
+      await this.outbox.recordStatusUpdated(client, {
+        orderId: order.id,
+        orderNumber: order.order_number,
+        from: previousStatus,
+        to: 'refunded',
+        refundAmount: refund.amount,
+        refundReference: providerReference,
+        actor: refund.requested_by,
+        timestamp: new Date().toISOString(),
+      });
 
       await client.query('COMMIT');
       return { refund, order };

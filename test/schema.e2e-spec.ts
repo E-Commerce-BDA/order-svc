@@ -214,11 +214,30 @@ describe('Order Schema & Fixtures (e2e)', () => {
     const eventId = randomUUID();
     const orderId = '018f0000-0000-7000-8000-000000000010';
 
+    // ord-011: a pending row has to carry the canonical envelope. `payload` is
+    // still there for the rows written before migration 006, and new rows leave
+    // it null.
     await pool.query(
       `INSERT INTO "order".outbox (
-        event_id, aggregate_type, aggregate_id, event_type, payload
-      ) VALUES ($1, 'order', $2, 'order.created', '{"test": true}');`,
-      [eventId, orderId],
+        event_id, aggregate_type, aggregate_id, event_type, envelope
+      ) VALUES ($1, 'order', $2, 'order.created', $3::jsonb);`,
+      [
+        eventId,
+        orderId,
+        JSON.stringify({
+          id: eventId,
+          type: 'order.created',
+          payload: {
+            orderId,
+            orderNumber: '#2026-900001',
+            userId: '018f0000-0000-7000-8000-000000000001',
+            grandTotal: 10,
+            itemsCount: 1,
+            reservationId: '',
+            createdAt: '2026-10-31T00:00:00.000Z',
+          },
+        }),
+      ],
     );
 
     const { rows } = await pool.query<OutboxRow>(
@@ -230,5 +249,22 @@ describe('Order Schema & Fixtures (e2e)', () => {
     expect(rows[0].status).toBe('pending');
     expect(rows[0].attempts).toBe(0);
     expect(rows[0].published_at).toBeNull();
+    expect(rows[0].payload).toBeNull();
+    expect(rows[0].envelope).toMatchObject({ id: eventId, type: 'order.created' });
+
+    await pool.query(`DELETE FROM "order".outbox WHERE event_id = $1;`, [eventId]);
+  });
+
+  it('rejects a pending outbox row that has no envelope', async () => {
+    const eventId = randomUUID();
+
+    await expect(
+      pool.query(
+        `INSERT INTO "order".outbox (
+          event_id, aggregate_type, aggregate_id, event_type, payload
+        ) VALUES ($1, 'order', '018f0000-0000-7000-8000-000000000010', 'order.created', '{"test": true}');`,
+        [eventId],
+      ),
+    ).rejects.toThrow(/outbox_pending_has_envelope/);
   });
 });

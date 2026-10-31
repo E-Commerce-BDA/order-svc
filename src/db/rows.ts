@@ -131,9 +131,14 @@ export interface OutboxRow {
   aggregate_type: string;
   aggregate_id: string;
   event_type: string;
-  payload: Record<string, unknown>;
+  /** `NULL` on rows written before migration 006; new rows leave it null too. */
+  payload: Record<string, unknown> | null;
+  /** The canonical wire envelope; `NOT NULL` for every pending row. */
+  envelope: Record<string, unknown> | null;
   status: OutboxStatus;
   attempts: number;
+  last_error: string | null;
+  locked_until: string | null;
   created_at: string;
   published_at: string | null;
 }

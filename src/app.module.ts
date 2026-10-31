@@ -8,7 +8,7 @@ import { DiscountsModule } from './discounts/discounts.module.js';
 import { CheckoutModule } from './checkout/checkout.module.js';
 import { OrdersModule } from './orders/orders.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
-import { OutboxModule } from './outbox/outbox.module.js';
+import { OrderOutboxModule } from './outbox/order-outbox.module.js';
 import { InternalModule } from './internal/internal.module.js';
 import Joi from 'joi';
 
@@ -24,6 +24,8 @@ import Joi from 'joi';
         INTERNAL_SERVICE_KEY: Joi.string().required(),
         CATALOG_SVC_URL: Joi.string().uri().default('http://localhost:4020'),
         CART_SVC_URL: Joi.string().uri().default('http://localhost:4030'),
+        KAFKA_BROKERS: Joi.string().default('localhost:9092'),
+        DISABLE_OUTBOX_RELAY: Joi.boolean().default(false),
       }),
     }),
     HealthModule,
@@ -34,7 +36,7 @@ import Joi from 'joi';
     CheckoutModule,
     OrdersModule,
     PaymentsModule,
-    OutboxModule,
+    OrderOutboxModule,
     InternalModule,
   ],
   controllers: [],

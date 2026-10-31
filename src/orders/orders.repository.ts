@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
 import { getPool } from '../db/pool.js';
+import { OrderOutbox } from '../outbox/order-outbox.js';
 import type {
   OrderItemRow,
   OrderRow,
@@ -20,6 +20,8 @@ export interface OrderWithDetails extends OrderRow {
 
 @Injectable()
 export class OrdersRepository {
+  constructor(private readonly outbox: OrderOutbox) {}
+
   /**
    * Loads customer orders with cursor-based pagination.
    */
@@ -234,7 +236,7 @@ export class OrdersRepository {
         [orderId, currentStatus, nextStatus, note, actor],
       );
 
-      const outboxPayload = {
+      await this.outbox.recordStatusUpdated(client, {
         orderId,
         orderNumber: orderRes.rows[0].order_number,
         from: currentStatus,
@@ -242,20 +244,7 @@ export class OrdersRepository {
         note,
         actor,
         timestamp: new Date().toISOString(),
-      };
-
-      await client.query(
-        `INSERT INTO "order".outbox (
-          event_id, aggregate_type, aggregate_id, event_type, payload
-        ) VALUES ($1, $2, $3, $4, $5);`,
-        [
-          randomUUID(),
-          'order',
-          orderId,
-          'order.status.updated',
-          JSON.stringify(outboxPayload),
-        ],
-      );
+      });
 
       await client.query('COMMIT');
       return orderRes.rows[0];

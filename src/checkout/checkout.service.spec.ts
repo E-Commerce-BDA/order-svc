@@ -459,7 +459,7 @@ describe('CheckoutService', () => {
       expect(mockRepository.confirmOrder).toHaveBeenCalledWith(
         'order-123',
         { transactionId: 'mock_tx_123' },
-        expect.objectContaining({ eventType: 'order.created' }),
+        expect.objectContaining({ topic: 'order.created' }),
       );
 
       const outbox = mockRepository.confirmOrder.mock.calls[0][2] as OutboxWrite;
@@ -565,7 +565,7 @@ describe('CheckoutService', () => {
       expect(mockRepository.confirmOrder).toHaveBeenCalledWith(
         'order-123',
         { transactionId: 'mock_tx_123' },
-        expect.objectContaining({ eventType: 'order.created' }),
+        expect.objectContaining({ topic: 'order.created' }),
       );
     });
 

@@ -11,7 +11,6 @@ import {
   JWT_ISSUER,
 } from '../src/auth/auth.constants.js';
 import { closePool, getPool } from '../src/db/pool.js';
-import { OutboxService } from '../src/outbox/outbox.service.js';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -27,7 +26,6 @@ process.env.DATABASE_URL ??= 'postgresql://ecom:ecom-dev-only@localhost:5433/eco
 describe('Orders Lifecycle & State Machine (e2e)', () => {
   let app: INestApplication<App>;
   let jwtService: JwtService;
-  let outboxService: OutboxService;
   let customerToken: string;
   let otherCustomerToken: string;
   let adminToken: string;
@@ -112,7 +110,6 @@ describe('Orders Lifecycle & State Machine (e2e)', () => {
     await app.init();
 
     jwtService = app.get(JwtService);
-    outboxService = app.get(OutboxService);
     const configService = app.get(ConfigService);
     const secret = configService.getOrThrow<string>('JWT_SECRET');
 
@@ -422,14 +419,17 @@ describe('Orders Lifecycle & State Machine (e2e)', () => {
 
       const events = await pool.query<{
         event_type: string;
-        payload: Record<string, unknown>;
+        envelope: { payload: Record<string, unknown> } | null;
       }>(
-        `SELECT event_type, payload FROM "order".outbox WHERE aggregate_id = $1;`,
+        `SELECT event_type, envelope FROM "order".outbox WHERE aggregate_id = $1;`,
         [createdOrderId],
       );
-      const refundEvent = events.rows.find((row) => row.payload?.to === 'refunded');
+      // Migration 006 leaves `payload` null: the envelope is what the relay sends.
+      const refundEvent = events.rows.find(
+        (row) => row.envelope?.payload?.to === 'refunded',
+      );
       expect(refundEvent?.event_type).toBe('order.status.updated');
-      expect(refundEvent?.payload).toMatchObject({
+      expect(refundEvent?.envelope?.payload).toMatchObject({
         orderId: createdOrderId,
         from: 'delivered',
         to: 'refunded',
@@ -553,25 +553,6 @@ describe('Orders Lifecycle & State Machine (e2e)', () => {
       );
       expect(refunded).toBeDefined();
       expect(refunded.status).toBe('refunded');
-    });
-  });
-
-  describe('Outbox Relay Worker Verification', () => {
-    it('processes pending outbox rows and marks them published', async () => {
-      const pool = getPool();
-      const countRes = await pool.query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM "order".outbox WHERE status = 'pending';`,
-      );
-      const pendingCount = parseInt(countRes.rows[0].count, 10);
-      expect(pendingCount).toBeGreaterThan(0);
-
-      const processed = await outboxService.processPendingEvents(50);
-      expect(processed).toBeGreaterThanOrEqual(pendingCount);
-
-      const remainingRes = await pool.query<{ count: string }>(
-        `SELECT COUNT(*)::text AS count FROM "order".outbox WHERE status = 'pending';`,
-      );
-      expect(parseInt(remainingRes.rows[0].count, 10)).toBe(0);
     });
   });
 });

@@ -34,6 +34,24 @@ if (!process.env.DATABASE_URL && typeof process.loadEnvFile === 'function') {
 }
 process.env.DATABASE_URL ??= 'postgresql://ecom:ecom-dev-only@localhost:5433/ecom';
 
+/**
+ * ord-011: the row now carries the canonical envelope and leaves `payload`
+ * null, so the event is read from the envelope it will be published with.
+ */
+function orderCreatedPayloadOf(row: OutboxRow): {
+  orderId: string;
+  orderNumber: string;
+  reservationId: string;
+} {
+  const envelope = row.envelope as {
+    type?: string;
+    payload?: { orderId: string; orderNumber: string; reservationId: string };
+  } | null;
+
+  expect(envelope?.type).toBe('order.created');
+  return envelope!.payload!;
+}
+
 describe('Checkout (e2e)', () => {
   let app: INestApplication<App>;
   let jwtService: JwtService;
@@ -347,7 +365,8 @@ describe('Checkout (e2e)', () => {
     // later commit (cat-009) or cancellation can find it without guessing.
     const reservationId = mockCatalogClient.reserveStock.mock.calls[0][0] as string;
     expect(orderRows[0].stock_reservation_id).toBe(reservationId);
-    expect(outboxRows[0].payload.reservationId).toBe(reservationId);
+    expect(outboxRows[0].payload).toBeNull();
+    expect(orderCreatedPayloadOf(outboxRows[0]).reservationId).toBe(reservationId);
 
     // Snapshots are requested by `variantId ?? productId`.
     expect(mockCatalogClient.getProductSnapshots).toHaveBeenCalledWith([productId]);
@@ -827,7 +846,9 @@ describe('Checkout (e2e)', () => {
         [pending.id],
       );
       expect(outbox.rows).toHaveLength(1);
-      expect(outbox.rows[0].payload.reservationId).toBe(pending.stock_reservation_id);
+      expect(orderCreatedPayloadOf(outbox.rows[0]).reservationId).toBe(
+        pending.stock_reservation_id,
+      );
     });
   });
 

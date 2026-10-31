@@ -572,7 +572,7 @@ export class CheckoutService {
     reservationId: string;
   }): OutboxWrite {
     return {
-      eventType: 'order.created',
+      topic: 'order.created',
       payload: ({ orderId, orderNumber }) => ({
         orderId,
         orderNumber,

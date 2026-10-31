@@ -1,7 +1,11 @@
 import { Injectable } from '@nestjs/common';
-import { randomInt, randomUUID } from 'node:crypto';
+import { randomInt } from 'node:crypto';
 import { getPool } from '../db/pool.js';
 import { DiscountsRepository } from '../discounts/discounts.repository.js';
+import {
+  OrderOutbox,
+  type OrderCreatedWrite,
+} from '../outbox/order-outbox.js';
 import type {
   OrderItemRow,
   OrderRow,
@@ -66,11 +70,13 @@ export interface PersistedOrder {
   orderNumber: string;
 }
 
-export interface OutboxWrite {
-  eventType: string;
-  /** Built after the insert so the payload can carry the generated identity. */
-  payload: (order: PersistedOrder) => Record<string, unknown>;
-}
+/**
+ * The `order.created` event a confirmation carries. The topic is part of the
+ * write so the repository never guesses which event a confirmation produces,
+ * and the payload builder is resolved only after the insert generated the
+ * order number.
+ */
+export type OutboxWrite = OrderCreatedWrite;
 
 /**
  * Thrown when `idx_orders_idem` rejects the insert: another attempt with the
@@ -91,7 +97,10 @@ export class DuplicateIdempotencyKeyError extends Error {
  */
 @Injectable()
 export class CheckoutRepository {
-  constructor(private readonly discountsRepository: DiscountsRepository) {}
+  constructor(
+    private readonly discountsRepository: DiscountsRepository,
+    private readonly outbox: OrderOutbox,
+  ) {}
 
   /**
    * The idempotency authority. Scoped by user, so a key can never resolve to
@@ -232,18 +241,10 @@ export class CheckoutRepository {
       }
 
       if (input.outbox) {
-        await client.query(
-          `INSERT INTO "order".outbox (
-            event_id, aggregate_type, aggregate_id, event_type, payload
-          ) VALUES ($1, $2, $3, $4, $5);`,
-          [
-            randomUUID(),
-            'order',
-            orderId,
-            input.outbox.eventType,
-            JSON.stringify(input.outbox.payload({ orderId, orderNumber })),
-          ],
-        );
+        await this.outbox.recordOrderCreated(client, input.outbox, {
+          orderId,
+          orderNumber,
+        });
       }
 
       await client.query('COMMIT');
@@ -318,18 +319,10 @@ export class CheckoutRepository {
       );
 
       if (outbox) {
-        await client.query(
-          `INSERT INTO "order".outbox (
-            event_id, aggregate_type, aggregate_id, event_type, payload
-          ) VALUES ($1, $2, $3, $4, $5);`,
-          [
-            randomUUID(),
-            'order',
-            orderId,
-            outbox.eventType,
-            JSON.stringify(outbox.payload({ orderId, orderNumber })),
-          ],
-        );
+        await this.outbox.recordOrderCreated(client, outbox, {
+          orderId,
+          orderNumber,
+        });
       }
 
       await client.query('COMMIT');
