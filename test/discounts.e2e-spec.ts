@@ -236,7 +236,7 @@ describe('Discounts (e2e)', () => {
         })
         .expect(200);
 
-      expect(parseFloat(res.body.code.value)).toBe(30);
+      expect(res.body.code.value).toBe(30);
       expect(res.body.code.max_uses).toBe(100);
     });
 

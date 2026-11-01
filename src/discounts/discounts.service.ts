@@ -51,7 +51,7 @@ export class DiscountsService {
       return { valid: false, message: 'Discount code usage limit reached' };
     }
 
-    const minAmount = row.min_order_amount ? parseFloat(row.min_order_amount) : 0;
+    const minAmount = row.min_order_amount ?? 0;
     if (cartTotal < minAmount) {
       return {
         valid: false,
@@ -59,13 +59,12 @@ export class DiscountsService {
       };
     }
 
-    const numericValue = parseFloat(row.value);
     let discount = 0;
 
     if (row.discount_type === 'percent') {
-      discount = Math.round(((cartTotal * numericValue) / 100) * 100) / 100;
+      discount = Math.round(((cartTotal * row.value) / 100) * 100) / 100;
     } else {
-      discount = Math.min(numericValue, cartTotal);
+      discount = Math.min(row.value, cartTotal);
     }
 
     // Ensure 2 decimal places and non-negative
@@ -76,7 +75,7 @@ export class DiscountsService {
       id: row.id,
       code: row.code,
       discountType: row.discount_type,
-      value: numericValue,
+      value: row.value,
       discount,
     };
   }
@@ -117,7 +116,7 @@ export class DiscountsService {
     const existing = await this.findById(id);
 
     const targetType = dto.discountType ?? existing.discount_type;
-    const targetValue = dto.value !== undefined ? dto.value : parseFloat(existing.value);
+    const targetValue = dto.value !== undefined ? dto.value : existing.value;
 
     if (targetType === 'percent' && targetValue > 100) {
       throw new BadRequestException('Percentage discount value cannot exceed 100%');

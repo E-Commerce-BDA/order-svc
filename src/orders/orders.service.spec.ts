@@ -62,11 +62,11 @@ describe('OrdersService', () => {
     user_id: 'user-abc',
     order_number: '#2026-100001',
     status: 'delivered',
-    subtotal: '100.00',
-    shipping_fee: '10.00',
-    tax: '8.00',
-    discount: '0.00',
-    grand_total: '118.00',
+    subtotal: 100,
+    shipping_fee: 10,
+    tax: 8,
+    discount: 0,
+    grand_total: 118,
     currency: 'USD',
     payment_status: 'paid',
     shipping_address: {
@@ -249,7 +249,7 @@ describe('OrdersService', () => {
       id: 'pay-123',
       order_id: 'ord-123',
       provider: 'mock',
-      amount: '118.00',
+      amount: 118,
       status: 'captured',
       transaction_id: 'mock_tx_seed',
       paid_at: '2026-10-27T10:00:00Z',
@@ -261,7 +261,7 @@ describe('OrdersService', () => {
       id: 'refund-123',
       order_id: 'ord-123',
       payment_id: 'pay-123',
-      amount: '118.00',
+      amount: 118,
       status: 'pending',
       provider_reference: null,
       failure_reason: null,
@@ -298,7 +298,7 @@ describe('OrdersService', () => {
           // Echo the reservation back the way Postgres would: the provider must be
           // asked for the amount the ledger reserved, not for the DTO's amount.
           refund: refundRow({
-            amount: input.amount.toFixed(2),
+            amount: input.amount,
             reason: input.reason,
             requested_by: input.requestedBy,
           }),
@@ -471,7 +471,7 @@ describe('OrdersService', () => {
     it('retries a failed refund with the amount it was reserved for', async () => {
       repo.findOrderById!.mockResolvedValue(sampleOrder);
       refunds.findByOrderId!.mockResolvedValue(
-        refundRow({ status: 'failed', amount: '50.00', failure_reason: 'Timeout' }),
+        refundRow({ status: 'failed', amount: 50, failure_reason: 'Timeout' }),
       );
       refunds.findCapturedPayment!.mockResolvedValue(capturedPaymentRow);
       payments.processRefund!.mockResolvedValue({
@@ -479,7 +479,7 @@ describe('OrdersService', () => {
         transactionId: 'mock_ref_2',
       });
       refunds.markSucceeded!.mockResolvedValue({
-        refund: refundRow({ status: 'succeeded', amount: '50.00' }),
+        refund: refundRow({ status: 'succeeded', amount: 50 }),
         order: refundedOrder(),
       });
 

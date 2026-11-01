@@ -409,7 +409,7 @@ describe('Orders Lifecycle & State Machine (e2e)', () => {
       expect(refundRows.rows[0].provider_reference).toBe(
         res.body.refund.provider_reference,
       );
-      expect(parseFloat(refundRows.rows[0].amount)).toBe(118);
+      expect(refundRows.rows[0].amount).toBe(118);
 
       const payment = await pool.query<PaymentRow>(
         `SELECT * FROM "order".payments WHERE order_id = $1;`,
@@ -433,7 +433,7 @@ describe('Orders Lifecycle & State Machine (e2e)', () => {
         orderId: createdOrderId,
         from: 'delivered',
         to: 'refunded',
-        refundAmount: '118.00',
+        refundAmount: 118,
         actor: adminId,
       });
 

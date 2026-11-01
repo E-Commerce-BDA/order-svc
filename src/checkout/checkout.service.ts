@@ -429,7 +429,7 @@ export class CheckoutService {
       });
     }
 
-    const grandTotal = Number(order.grand_total);
+    const grandTotal = order.grand_total;
     let transactionId: string;
 
     try {
@@ -623,20 +623,20 @@ export class CheckoutService {
       orderNumber: order.order_number,
       status: order.status,
       totals: {
-        subtotal: Number(order.subtotal),
-        shipping: Number(order.shipping_fee),
-        tax: Number(order.tax),
-        discount: Number(order.discount),
-        grandTotal: Number(order.grand_total),
+        subtotal: order.subtotal,
+        shipping: order.shipping_fee,
+        tax: order.tax,
+        discount: order.discount,
+        grandTotal: order.grand_total,
       },
       items: items.map((item) => ({
         productId: item.product_id,
         variantId: item.variant_id ?? undefined,
         productName: item.product_name,
         sku: item.sku,
-        unitPrice: Number(item.unit_price),
+        unitPrice: item.unit_price,
         qty: item.qty,
-        lineTotal: Number(item.line_total),
+        lineTotal: item.line_total,
       })),
     };
   }

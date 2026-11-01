@@ -330,7 +330,7 @@ describe('Checkout (e2e)', () => {
     );
     expect(orderRows.length).toBe(1);
     expect(orderRows[0].user_id).toBe(userId);
-    expect(parseFloat(orderRows[0].grand_total)).toBe(144);
+    expect(orderRows[0].grand_total).toBe(144);
     expect(orderRows[0].payment_status).toBe('paid');
 
     // Verify order items snapshot
@@ -341,7 +341,7 @@ describe('Checkout (e2e)', () => {
     expect(itemRows.length).toBe(1);
     expect(itemRows[0].product_name).toBe('Running Shoe Pro');
     expect(itemRows[0].sku).toBe('RSP-BLK-42');
-    expect(parseFloat(itemRows[0].unit_price)).toBe(80);
+    expect(itemRows[0].unit_price).toBe(80);
     expect(itemRows[0].qty).toBe(2);
 
     // Verify payment record
@@ -397,7 +397,7 @@ describe('Checkout (e2e)', () => {
     );
     expect(rows[0].variant_id).toBe(variantId);
     expect(rows[0].sku).toBe('RSP-BLK-44');
-    expect(parseFloat(rows[0].unit_price)).toBe(95);
+    expect(rows[0].unit_price).toBe(95);
   });
 
   it('surfaces a catalog 409 as a checkout 409 with the stock failure code', async () => {

@@ -1,6 +1,10 @@
 /**
  * Typed row representations mirroring the PostgreSQL `order` schema.
- * All DECIMAL columns remain strings in TypeScript to preserve exact monetary precision.
+ *
+ * Money is `number` here: `DECIMAL(12,2)` is parsed to a JS number by the NUMERIC
+ * type parser in `db/pool.ts`, so a row is the same shape as every other response
+ * in the service. Columns stay `DECIMAL` — exact decimal storage is the money
+ * convention; only the driver's default string output is overridden.
  * Reference: Documentation/3.Database-Schema.md §3.4
  */
 
@@ -8,8 +12,8 @@ export interface DiscountCodeRow {
   id: string;
   code: string;
   discount_type: 'percent' | 'fixed';
-  value: string;
-  min_order_amount: string | null;
+  value: number;
+  min_order_amount: number | null;
   max_uses: number | null;
   uses_count: number;
   starts_at: string | null;
@@ -45,11 +49,11 @@ export interface OrderRow {
   user_id: string;
   order_number: string;
   status: OrderStatus;
-  subtotal: string;
-  shipping_fee: string;
-  tax: string;
-  discount: string;
-  grand_total: string;
+  subtotal: number;
+  shipping_fee: number;
+  tax: number;
+  discount: number;
+  grand_total: number;
   currency: string;
   payment_status: PaymentStatus;
   shipping_address: OrderAddress;
@@ -70,9 +74,9 @@ export interface OrderItemRow {
   variant_id: string | null;
   product_name: string;
   sku: string;
-  unit_price: string;
+  unit_price: number;
   qty: number;
-  line_total: string;
+  line_total: number;
   options: Record<string, string> | null;
 }
 
@@ -98,7 +102,7 @@ export interface PaymentRow {
   id: string;
   order_id: string;
   provider: PaymentProvider;
-  amount: string;
+  amount: number;
   status: PaymentLifecycleStatus;
   transaction_id: string | null;
   paid_at: string | null;
@@ -113,7 +117,7 @@ export interface RefundRow {
   id: string;
   order_id: string;
   payment_id: string;
-  amount: string;
+  amount: number;
   status: RefundStatus;
   provider_reference: string | null;
   failure_reason: string | null;

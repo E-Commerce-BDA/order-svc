@@ -168,12 +168,12 @@ export class OrdersService {
     if (existing?.status === 'succeeded') return { order, refund: existing };
     if (existing?.status === 'pending') throw refundInProgress(orderId);
 
-    const grandTotalNum = parseFloat(order.grand_total);
-    const requestedAmount = dto.amount ?? grandTotalNum;
+    const grandTotal = order.grand_total;
+    const requestedAmount = dto.amount ?? grandTotal;
 
-    if (requestedAmount > grandTotalNum) {
+    if (requestedAmount > grandTotal) {
       throw new BadRequestException(
-        `Refund amount ($${requestedAmount.toFixed(2)}) exceeds order grand total ($${grandTotalNum.toFixed(2)})`,
+        `Refund amount ($${requestedAmount.toFixed(2)}) exceeds order grand total ($${grandTotal.toFixed(2)})`,
       );
     }
 
@@ -206,7 +206,7 @@ export class OrdersService {
 
     // A failed attempt is retried in place, with the amount it was reserved for,
     // so a provider outage cannot change what the customer gets back.
-    const amount = Number(refund.amount);
+    const amount = refund.amount;
     let result: PaymentResult;
 
     try {

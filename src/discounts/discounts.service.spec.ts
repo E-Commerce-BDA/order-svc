@@ -19,7 +19,7 @@ describe('DiscountsService', () => {
     id: '018f0000-0000-7000-8000-000000000001',
     code: 'SAVE10',
     discount_type: 'percent',
-    value: '10.00',
+    value: 10,
     min_order_amount: null,
     max_uses: null,
     uses_count: 0,
@@ -94,7 +94,7 @@ describe('DiscountsService', () => {
 
     it('returns valid: false when cart total is below min_order_amount', async () => {
       mockRepo.findByCode.mockResolvedValueOnce(
-        createMockRow({ min_order_amount: '50.00' }),
+        createMockRow({ min_order_amount: 50 }),
       );
       const res = await service.validate('SAVE10', 40);
       expect(res.valid).toBe(false);
@@ -103,7 +103,7 @@ describe('DiscountsService', () => {
 
     it('calculates percentage discount accurately', async () => {
       mockRepo.findByCode.mockResolvedValueOnce(
-        createMockRow({ discount_type: 'percent', value: '15.00' }),
+        createMockRow({ discount_type: 'percent', value: 15 }),
       );
       const res = await service.validate('SAVE15', 200);
       expect(res.valid).toBe(true);
@@ -112,7 +112,7 @@ describe('DiscountsService', () => {
 
     it('calculates fixed discount accurately', async () => {
       mockRepo.findByCode.mockResolvedValueOnce(
-        createMockRow({ discount_type: 'fixed', value: '25.00' }),
+        createMockRow({ discount_type: 'fixed', value: 25 }),
       );
       const res = await service.validate('FLAT25', 100);
       expect(res.valid).toBe(true);
@@ -121,7 +121,7 @@ describe('DiscountsService', () => {
 
     it('clamps fixed discount to cart total if discount exceeds cart total', async () => {
       mockRepo.findByCode.mockResolvedValueOnce(
-        createMockRow({ discount_type: 'fixed', value: '50.00' }),
+        createMockRow({ discount_type: 'fixed', value: 50 }),
       );
       const res = await service.validate('FLAT50', 30);
       expect(res.valid).toBe(true);

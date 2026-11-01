@@ -85,12 +85,12 @@ describe('Order Schema & Fixtures (e2e)', () => {
 
     const save10 = rows.find((r) => r.code === 'SAVE10');
     expect(save10?.discount_type).toBe('percent');
-    expect(parseFloat(save10?.value ?? '0')).toBe(10);
+    expect(save10?.value).toBe(10);
     expect(save10?.is_active).toBe(true);
 
     const flat20 = rows.find((r) => r.code === 'FLAT20');
     expect(flat20?.discount_type).toBe('fixed');
-    expect(parseFloat(flat20?.min_order_amount ?? '0')).toBe(50);
+    expect(flat20?.min_order_amount).toBe(50);
   });
 
   it('enforces percentage discount cannot exceed 100%', async () => {
@@ -119,7 +119,7 @@ describe('Order Schema & Fixtures (e2e)', () => {
     const order = orderRes.rows[0];
     expect(order.status).toBe('confirmed');
     expect(order.payment_status).toBe('paid');
-    expect(parseFloat(order.grand_total)).toBe(148.98);
+    expect(order.grand_total).toBe(148.98);
 
     const itemsRes = await pool.query<OrderItemRow>(
       `SELECT * FROM "order".order_items WHERE order_id = $1;`,
