@@ -10,7 +10,6 @@ import {
 import { CheckoutService } from './checkout.service.js';
 import { RedisService } from '../redis/redis.service.js';
 import { CatalogClient } from '../clients/catalog.client.js';
-import { CartClient } from '../clients/cart.client.js';
 import { DiscountsService } from '../discounts/discounts.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import { canonicalJson } from '../common/canonical-json.js';
@@ -40,7 +39,6 @@ describe('CheckoutService', () => {
     releaseStock: ReturnType<typeof vi.fn>;
     getProductSnapshots: ReturnType<typeof vi.fn>;
   };
-  let mockCartClient: { convertCart: ReturnType<typeof vi.fn> };
   let mockDiscountsService: { validate: ReturnType<typeof vi.fn> };
   let mockPaymentsService: {
     processPayment: ReturnType<typeof vi.fn>;
@@ -219,8 +217,6 @@ describe('CheckoutService', () => {
       ),
     };
 
-    mockCartClient = { convertCart: vi.fn().mockResolvedValue(undefined) };
-
     mockDiscountsService = {
       validate: vi.fn().mockResolvedValue({ valid: true, discount: 10, id: 'coupon-1' }),
     };
@@ -248,7 +244,6 @@ describe('CheckoutService', () => {
     service = new CheckoutService(
       mockRedis as unknown as RedisService,
       mockCatalogClient as unknown as CatalogClient,
-      mockCartClient as unknown as CartClient,
       mockDiscountsService as unknown as DiscountsService,
       mockPaymentsService as unknown as PaymentsService,
       mockRepository as unknown as CheckoutRepository,
@@ -417,6 +412,24 @@ describe('CheckoutService', () => {
         service.checkout(USER_ID, KEY, createSampleDto()),
       ).rejects.toThrow(ConflictException);
       expect(mockRedis.del).toHaveBeenCalledWith(LOCK_KEY);
+    });
+  });
+
+  describe('cart conversion (ord-012)', () => {
+    // cart-svc deleted `/internal/carts/:userId/convert` in ca-009, so the old
+    // bridge was POSTing to a dead route on every checkout and logging a 404.
+    // Conversion now comes from cart-svc's own `order.created` consumer.
+    it('makes no outbound HTTP call while confirming an order', async () => {
+      const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+      try {
+        const result = await service.checkout(USER_ID, KEY, createSampleDto());
+
+        expect(result.orderId).toBe('order-123');
+        expect(fetchSpy).not.toHaveBeenCalled();
+      } finally {
+        fetchSpy.mockRestore();
+      }
     });
   });
 

@@ -1,14 +1,15 @@
 import { Module } from '@nestjs/common';
 import { CatalogClient } from './catalog.client.js';
-import { CartClient } from './cart.client.js';
 
 /**
- * Outbound HTTP clients, owned in one place. Checkout needs both, and orders
- * needs catalog to release a stock hold when an order is cancelled — providing
- * the clients twice would give two instances and, one day, a module cycle.
+ * Outbound HTTP clients, owned in one place. Checkout reserves stock through
+ * catalog-svc and orders releases a hold through it when an order is cancelled;
+ * providing the client twice would give two instances and, one day, a module
+ * cycle. There is no cart client: conversion is cart-svc's own reaction to
+ * `order.created` (ord-012), not a call from here.
  */
 @Module({
-  providers: [CatalogClient, CartClient],
-  exports: [CatalogClient, CartClient],
+  providers: [CatalogClient],
+  exports: [CatalogClient],
 })
 export class ClientsModule {}

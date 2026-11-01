@@ -13,7 +13,6 @@ import { createHash, randomUUID } from 'node:crypto';
 import { canonicalJson } from '../common/canonical-json.js';
 import { RedisService } from '../redis/redis.service.js';
 import { CatalogClient, type ReserveStockResult } from '../clients/catalog.client.js';
-import { CartClient } from '../clients/cart.client.js';
 import { DiscountsService } from '../discounts/discounts.service.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import type { PaymentResult } from '../payments/payment-provider.interface.js';
@@ -78,7 +77,6 @@ export class CheckoutService {
   constructor(
     private readonly redisService: RedisService,
     private readonly catalogClient: CatalogClient,
-    private readonly cartClient: CartClient,
     private readonly discountsService: DiscountsService,
     private readonly paymentsService: PaymentsService,
     private readonly checkoutRepository: CheckoutRepository,
@@ -150,9 +148,10 @@ export class CheckoutService {
       }
 
       await this.cacheResponse(cacheKey, bodyHash, confirmation);
-      // Phase-0 bridge until ca-009; must never fail the confirmation.
-      this.cartClient.convertCart(userId).catch(() => {});
 
+      // Nothing else happens here. The cart is converted by cart-svc's own
+      // `order.created` consumer (ca-009), which sees the event even when this
+      // response never reaches the browser (ord-012 removed the HTTP bridge).
       return confirmation;
     } finally {
       await this.releaseLock(lockKey);

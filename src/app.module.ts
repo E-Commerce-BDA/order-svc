@@ -23,7 +23,6 @@ import Joi from 'joi';
         REDIS_URL: Joi.string().uri().default('redis://localhost:6379'),
         INTERNAL_SERVICE_KEY: Joi.string().required(),
         CATALOG_SVC_URL: Joi.string().uri().default('http://localhost:4020'),
-        CART_SVC_URL: Joi.string().uri().default('http://localhost:4030'),
         KAFKA_BROKERS: Joi.string().default('localhost:9092'),
         DISABLE_OUTBOX_RELAY: Joi.boolean().default(false),
       }),
