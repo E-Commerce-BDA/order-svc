@@ -172,6 +172,14 @@ export class CheckoutService {
     // Generated locally and stored on the order, so a compensation can release
     // exactly this hold and nothing else.
     const reservationId = randomUUID();
+    // Also generated here instead of by the `orders` column default, because the
+    // hold is told which order owns it. That sets
+    // `catalog.stock_reservations.order_id` while the reservation is still
+    // `held`, which is what lets catalog release it from an
+    // `order.status.updated` (cat-010) rather than only from the best-effort
+    // HTTP release below — the call that has no guarantee of arriving.
+    // `createOrder` writes the row under this id, so the two cannot disagree.
+    const plannedOrderId = randomUUID();
 
     const reservation = await this.catalogClient.reserveStock(
       reservationId,
@@ -180,6 +188,7 @@ export class CheckoutService {
         variantId: item.variantId ?? null,
         quantity: item.qty,
       })),
+      plannedOrderId,
     );
 
     if (!reservation.ok) throw this.toStockError(reservation);
@@ -222,6 +231,7 @@ export class CheckoutService {
       phase = 'persisting';
       const pending = await this.checkoutRepository.createOrder({
         userId,
+        orderId: plannedOrderId,
         status: 'pending',
         paymentStatus: 'pending',
         subtotal,
@@ -248,6 +258,8 @@ export class CheckoutService {
         },
         outbox: null,
       });
+      // The row's own id stays the authority from here on; `insertOrder` fails
+      // rather than return an id that differs from the one the hold names.
       orderId = pending.orderId;
       phase = 'persisted';
 

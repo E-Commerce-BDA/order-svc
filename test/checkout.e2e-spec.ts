@@ -94,8 +94,9 @@ describe('Checkout (e2e)', () => {
 
   /**
    * Contract-faithful fake. It fails the suite if order-svc ever sends `qty`
-   * again, drops the caller-supplied reservation id, or reads a snapshot under
-   * the wrong key — a looser mock is what hid the 400-on-every-checkout bug.
+   * again, drops the caller-supplied reservation id or the order id the hold
+   * must name, or reads a snapshot under the wrong key — a looser mock is what
+   * hid the 400-on-every-checkout bug.
    */
   const createCatalogFake = () => ({
     reserveStock: vi.fn(
@@ -106,8 +107,12 @@ describe('Checkout (e2e)', () => {
           variantId?: string | null;
           quantity: number;
         }>,
+        orderId?: string,
       ) => {
         expect(reservationId).toMatch(UUID_RE);
+        // cat-010: the hold names its order while it is still `held`, so a
+        // cancellation can find it without waiting for `order.created`.
+        expect(orderId).toMatch(UUID_RE);
         expect(items.length).toBeGreaterThan(0);
         for (const item of items) {
           expect(item).toHaveProperty('quantity');
@@ -365,6 +370,9 @@ describe('Checkout (e2e)', () => {
     // later commit (cat-009) or cancellation can find it without guessing.
     const reservationId = mockCatalogClient.reserveStock.mock.calls[0][0] as string;
     expect(orderRows[0].stock_reservation_id).toBe(reservationId);
+    // ...and the same order id the row was written under, so catalog can resolve
+    // a cancellation by `order_id` before the commit lands (cat-010).
+    expect(mockCatalogClient.reserveStock.mock.calls[0][2]).toBe(orderId);
     expect(outboxRows[0].payload).toBeNull();
     expect(orderCreatedPayloadOf(outboxRows[0]).reservationId).toBe(reservationId);
 

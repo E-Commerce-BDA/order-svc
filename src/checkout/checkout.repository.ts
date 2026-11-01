@@ -42,6 +42,13 @@ export interface CheckoutPaymentWrite {
 
 export interface CreateOrderInput {
   userId: string;
+  /**
+   * The id the order must be written under. Checkout supplies one because the
+   * stock hold already names it (`catalog.stock_reservations.order_id`), so the
+   * reservation can be found by order id while it is still held. Omitted, the
+   * column default assigns one.
+   */
+  orderId?: string;
   status: OrderStatus;
   paymentStatus: PaymentStatus;
   subtotal: number;
@@ -168,8 +175,9 @@ export class CheckoutRepository {
         `INSERT INTO "order".orders (
           user_id, order_number, status, subtotal, shipping_fee, tax, discount, grand_total,
           currency, payment_status, shipping_address, billing_address, discount_code_id,
-          stock_reservation_id, idempotency_key, idempotency_body_hash, notes
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+          stock_reservation_id, idempotency_key, idempotency_body_hash, notes, id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+          COALESCE($18::uuid, gen_random_uuid()))
         RETURNING id;`,
         [
           input.userId,
@@ -189,9 +197,20 @@ export class CheckoutRepository {
           input.idempotencyKey,
           input.idempotencyBodyHash,
           input.notes,
+          input.orderId ?? null,
         ],
       );
       const orderId = rows[0].id;
+
+      if (input.orderId && orderId !== input.orderId) {
+        // The stock hold already names an order id, so a row written under a
+        // different one would leave `catalog.stock_reservations.order_id`
+        // pointing at nothing and no cancellation able to find it. Fail inside
+        // the transaction rather than return the drifted id.
+        throw new Error(
+          `Order id drifted: expected ${input.orderId}, wrote ${orderId}`,
+        );
+      }
 
       for (const item of input.items) {
         await client.query(
