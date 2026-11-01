@@ -19,7 +19,7 @@
     "test:e2e": "vitest run --config ./vitest.config.e2e.ts"
   },
   "dependencies": {
-    "@ecom/contracts": "file:..\\ecom-contracts\\ecom-contracts-1.8.0.tgz",
+    "@ecom/contracts": "file:..\\ecom-contracts\\ecom-contracts-1.10.0.tgz",
     "@ecom/messaging": "file:..\\ecom-messaging\\ecom-messaging-0.2.0.tgz",
     "@nestjs/common": "^12.0.1",
     "@nestjs/config": "^12.0.1",
