@@ -67,7 +67,19 @@ INSERT INTO "order".discount_codes (
     now() + interval '30 days',
     false
   )
-ON CONFLICT (code) DO NOTHING;
+-- Re-applied, not skipped: a checkout test with a coupon *spends* one use, so
+-- `DO NOTHING` would leave SAVE10 exhausted (`uses_count = max_uses`) after ten
+-- runs and every later checkout would answer 422 COUPON_INVALID. The seed is the
+-- fixture's definition of truth, so re-running it resets counters and window.
+ON CONFLICT (code) DO UPDATE SET
+  discount_type = EXCLUDED.discount_type,
+  value = EXCLUDED.value,
+  min_order_amount = EXCLUDED.min_order_amount,
+  max_uses = EXCLUDED.max_uses,
+  uses_count = EXCLUDED.uses_count,
+  starts_at = EXCLUDED.starts_at,
+  ends_at = EXCLUDED.ends_at,
+  is_active = EXCLUDED.is_active;
 
 -- ============================================================================
 -- Sample Seed Order
