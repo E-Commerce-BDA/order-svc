@@ -108,7 +108,6 @@ describe('Security, Guards & Envelope (e2e)', () => {
       },
     );
 
-    // Insert order fixture for security tests
     sampleOrderId = randomUUID();
     await pool.query(
       `INSERT INTO "order".orders (

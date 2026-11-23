@@ -413,7 +413,6 @@ describe('OrdersService', () => {
       repo.findOrderById!.mockResolvedValue(sampleOrder);
       refunds.findByOrderId!.mockResolvedValue(null);
       refunds.findCapturedPayment!.mockResolvedValue(capturedPaymentRow);
-      // The other request inserted first, so this insert hit the unique index.
       refunds.startRefund!.mockResolvedValue({
         refund: refundRow({ status: 'pending' }),
         created: false,

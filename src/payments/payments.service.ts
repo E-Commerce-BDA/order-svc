@@ -16,7 +16,6 @@ export class PaymentsService {
       case 'mock':
       case 'stripe':
       case 'paypal':
-        // v1 routes all providers through mock engine
         return this.mockProvider.capture(amount, orderId, metadata);
       default:
         return {

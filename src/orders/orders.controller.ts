@@ -78,9 +78,6 @@ export class OrdersController {
     return { history };
   }
 
-  /**
-   * Admin: Update order status adhering to the finite state machine.
-   */
   @Patch(':id/status')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')

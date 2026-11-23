@@ -35,7 +35,6 @@ export class HttpExceptionFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
     const requestId = getRequestId(request);
 
-    // Readiness and liveness probes stay outside the API envelope
     if (isHealthPath(request)) {
       this.writeHealthResponse(exception, response);
       return;

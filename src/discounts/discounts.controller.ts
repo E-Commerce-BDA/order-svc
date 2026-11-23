@@ -25,10 +25,6 @@ import type { DiscountCodeRow } from '../db/rows.js';
 export class DiscountsController {
   constructor(private readonly discountsService: DiscountsService) {}
 
-  /**
-   * Public / Customer coupon validation endpoint.
-   * Checks expiration, min order amount, max uses, and calculates discount.
-   */
   @Post('validate')
   @HttpCode(HttpStatus.OK)
   async validate(

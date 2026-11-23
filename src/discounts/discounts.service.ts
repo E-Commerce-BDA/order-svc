@@ -67,7 +67,6 @@ export class DiscountsService {
       discount = Math.min(row.value, cartTotal);
     }
 
-    // Ensure 2 decimal places and non-negative
     discount = Math.max(0, Math.round(discount * 100) / 100);
 
     return {

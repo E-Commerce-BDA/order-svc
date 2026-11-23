@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
-/** A dead catalog must fail checkout in seconds, not hold the request open. */
 const REQUEST_TIMEOUT_MS = 3_000;
 
 export interface ProductSnapshot {
@@ -220,7 +219,6 @@ export class CatalogClient {
     return map;
   }
 
-  /** Returns null when the request never reached catalog (network or timeout). */
   private async post(path: string, body: unknown): Promise<Response | null> {
     try {
       return await fetch(`${this.catalogUrl}${path}`, {

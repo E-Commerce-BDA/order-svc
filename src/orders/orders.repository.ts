@@ -63,9 +63,6 @@ export class OrdersRepository {
     return { data, nextCursor };
   }
 
-  /**
-   * Loads an order by its ID with complete relation snapshot.
-   */
   async findOrderById(orderId: string): Promise<OrderWithDetails | null> {
     const UUID_REGEX =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -113,9 +110,6 @@ export class OrdersRepository {
     return res.rows;
   }
 
-  /**
-   * Admin order list with filtering, searching, and pagination.
-   */
   async findAdminOrders(queryDto: AdminOrderQueryDto): Promise<{
     data: OrderWithDetails[];
     total: number;
@@ -197,9 +191,6 @@ export class OrdersRepository {
     };
   }
 
-  /**
-   * Transactionally updates order status, records history entry, and enqueues outbox event.
-   */
   async updateStatusWithHistory(
     orderId: string,
     currentStatus: OrderStatus,

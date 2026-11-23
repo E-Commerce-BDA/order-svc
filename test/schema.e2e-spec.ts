@@ -164,17 +164,14 @@ describe('Order Schema & Fixtures (e2e)', () => {
         [tempId],
       );
 
-      // Verify inserted
       const countBefore = await client.query(
         `SELECT count(*) FROM "order".order_items WHERE order_id = $1;`,
         [tempId],
       );
       expect(parseInt(countBefore.rows[0].count, 10)).toBe(1);
 
-      // Delete parent order
       await client.query(`DELETE FROM "order".orders WHERE id = $1;`, [tempId]);
 
-      // Items and history should be cascaded
       const countAfter = await client.query(
         `SELECT count(*) FROM "order".order_items WHERE order_id = $1;`,
         [tempId],
@@ -193,7 +190,6 @@ describe('Order Schema & Fixtures (e2e)', () => {
     );
     const initialUpdatedAt = new Date(initial[0].updated_at).getTime();
 
-    // Small delay to ensure timestamp moves forward
     await new Promise((r) => setTimeout(r, 50));
 
     await pool.query(

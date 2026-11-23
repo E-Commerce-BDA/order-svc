@@ -319,7 +319,6 @@ describe('Checkout (e2e)', () => {
     expect(res.body.orderNumber).toMatch(/^#2026-\d{6}$/);
     expect(res.body.status).toBe('confirmed');
 
-    // Totals verification (subtotal: 80 * 2 = 160, shipping: 0 (subtotal >= 100), discount: 10% = 16, grandTotal: 144)
     expect(res.body.totals.subtotal).toBe(160);
     expect(res.body.totals.shipping).toBe(0);
     expect(res.body.totals.discount).toBe(16);
@@ -328,7 +327,6 @@ describe('Checkout (e2e)', () => {
     const orderId = res.body.orderId;
     const pool = getPool();
 
-    // Verify order row in PostgreSQL
     const { rows: orderRows } = await pool.query<OrderRow>(
       `SELECT * FROM "order".orders WHERE id = $1;`,
       [orderId],
@@ -338,7 +336,6 @@ describe('Checkout (e2e)', () => {
     expect(orderRows[0].grand_total).toBe(144);
     expect(orderRows[0].payment_status).toBe('paid');
 
-    // Verify order items snapshot
     const { rows: itemRows } = await pool.query<OrderItemRow>(
       `SELECT * FROM "order".order_items WHERE order_id = $1;`,
       [orderId],
@@ -349,7 +346,6 @@ describe('Checkout (e2e)', () => {
     expect(itemRows[0].unit_price).toBe(80);
     expect(itemRows[0].qty).toBe(2);
 
-    // Verify payment record
     const { rows: payRows } = await pool.query<PaymentRow>(
       `SELECT * FROM "order".payments WHERE order_id = $1;`,
       [orderId],
@@ -357,7 +353,6 @@ describe('Checkout (e2e)', () => {
     expect(payRows.length).toBe(1);
     expect(payRows[0].status).toBe('captured');
 
-    // Verify transactional outbox row
     const { rows: outboxRows } = await pool.query<OutboxRow>(
       `SELECT * FROM "order".outbox WHERE aggregate_id = $1;`,
       [orderId],
@@ -376,7 +371,6 @@ describe('Checkout (e2e)', () => {
     expect(outboxRows[0].payload).toBeNull();
     expect(orderCreatedPayloadOf(outboxRows[0]).reservationId).toBe(reservationId);
 
-    // Snapshots are requested by `variantId ?? productId`.
     expect(mockCatalogClient.getProductSnapshots).toHaveBeenCalledWith([productId]);
   });
 
@@ -394,7 +388,6 @@ describe('Checkout (e2e)', () => {
       })
       .expect(201);
 
-    // Variant price (95), no discount, shipping applies below the 100 threshold.
     expect(res.body.totals.subtotal).toBe(95);
     expect(res.body.totals.grandTotal).toBe(100);
     expect(mockCatalogClient.getProductSnapshots).toHaveBeenCalledWith([variantId]);
@@ -430,7 +423,6 @@ describe('Checkout (e2e)', () => {
     const key = `idem-replay-${randomUUID()}`;
     const payload = sampleCheckoutPayload();
 
-    // 1st submission
     const firstRes = await request(app.getHttpServer())
       .post('/api/v1/checkout')
       .set('Authorization', `Bearer ${customerToken}`)
@@ -445,7 +437,6 @@ describe('Checkout (e2e)', () => {
     );
     expect(parseInt(countBefore.rows[0].count, 10)).toBe(1);
 
-    // 2nd submission with exact same key and payload
     const replayRes = await request(app.getHttpServer())
       .post('/api/v1/checkout')
       .set('Authorization', `Bearer ${customerToken}`)
@@ -456,7 +447,6 @@ describe('Checkout (e2e)', () => {
     expect(replayRes.body.orderId).toBe(firstRes.body.orderId);
     expect(replayRes.body.orderNumber).toBe(firstRes.body.orderNumber);
 
-    // Assert no duplicate order created
     const countAfter = await pool.query<{ count: string }>(
       `SELECT count(*) FROM "order".orders WHERE id = $1;`,
       [firstRes.body.orderId],
@@ -475,7 +465,6 @@ describe('Checkout (e2e)', () => {
       .send(payload1)
       .expect(201);
 
-    // Payload 2 modifies qty to 5
     const payload2 = sampleCheckoutPayload();
     payload2.items[0].qty = 5;
 
@@ -619,7 +608,6 @@ describe('Checkout (e2e)', () => {
       .expect(422);
 
     expect(res.body.message).toContain('expired');
-    // Stock release compensation must have been invoked
     expect(mockCatalogClient.releaseStock).toHaveBeenCalled();
   });
 
@@ -841,8 +829,6 @@ describe('Checkout (e2e)', () => {
       expect(resumed.body.orderNumber).toBe(pending.order_number);
       expect(resumed.body.status).toBe('confirmed');
 
-      // Two capture attempts, both against the same still-pending row: one order,
-      // one reservation, one confirmation.
       expect(settle.captures).toHaveLength(2);
       expect(settle.captures[1].orderId).toBe(pending.id);
       expect(settle.captures[1].status).toBe('pending');

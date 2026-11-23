@@ -167,10 +167,6 @@ describe('Order outbox (e2e)', () => {
     return order;
   }
 
-  /**
-   * A `pending` order with an unpaid payment, so the confirmation transaction
-   * can be driven directly and forced to fail at a chosen point.
-   */
   async function seedPendingOrder(): Promise<string> {
     const orderId = trackOrder(randomUUID());
     const orderNumber = `#2026-${randomInt(100_000, 999_999)}`;
@@ -348,7 +344,6 @@ describe('Order outbox (e2e)', () => {
     expect(payload.orderId).toBe(order.orderId);
     expect(payload.orderNumber).toBe(order.orderNumber);
     expect(payload.userId).toBe(customerId);
-    // 80.00 * 2, free shipping above 100, no discount code.
     expect(payload.grandTotal).toBe(160);
     expect(payload.itemsCount).toBe(1);
     expect(payload.reservationId).toMatch(
@@ -450,7 +445,6 @@ describe('Order outbox (e2e)', () => {
         {
           topic: 'order.created',
           payload: () => {
-            // Stands in for any failure between the event write and the commit.
             throw new Error('forced failure after the outbox write');
           },
         },
@@ -507,7 +501,6 @@ describe('Order outbox (e2e)', () => {
         { orderId, orderNumber },
       );
 
-      // Visible inside the transaction: the store used the client it was given.
       const inside = await client.query<{ count: string }>(
         `SELECT count(*) FROM "order".outbox WHERE event_id = $1;`,
         [eventId],

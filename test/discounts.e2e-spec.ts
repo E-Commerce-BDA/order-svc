@@ -26,7 +26,6 @@ describe('Discounts (e2e)', () => {
   let customerToken: string;
 
   beforeAll(async () => {
-    // Ensure DB schema & seed exist
     const pool = getPool();
     const schemaSql = readFileSync(
       join(__dirname, '../db/001-order-schema.sql'),

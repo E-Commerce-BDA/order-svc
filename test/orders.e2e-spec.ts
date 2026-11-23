@@ -146,7 +146,6 @@ describe('Orders Lifecycle & State Machine (e2e)', () => {
       },
     );
 
-    // Insert an initial active order for testing
     createdOrderId = randomUUID();
     await pool.query(
       `INSERT INTO "order".orders (
@@ -391,7 +390,6 @@ describe('Orders Lifecycle & State Machine (e2e)', () => {
       expect(res.body.refund.status).toBe('succeeded');
       expect(res.body.refund.provider_reference).toMatch(/^mock_ref_/);
 
-      // The provider has to see the transaction we captured, not the order id.
       expect(providerRefund).toHaveBeenCalledTimes(1);
       expect(providerRefund).toHaveBeenCalledWith(
         createdPaymentTx,

@@ -375,7 +375,6 @@ export class CheckoutService {
     const { error, phase, orderId, grandTotal, transactionId, reservationId } = state;
 
     if (phase === 'pricing') {
-      // Nothing durable exists; the original status (409/502/503/422) stands.
       await this.releaseHold(reservationId);
       return error;
     }
@@ -412,7 +411,6 @@ export class CheckoutService {
       return error;
     }
 
-    // The money moved and TX2 did not commit: refund, then close what is left.
     return this.rollBackCapture(
       settledOrderId,
       transactionId as string,

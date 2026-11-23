@@ -442,7 +442,6 @@ describe('CheckoutService', () => {
       expect(result.orderNumber).toMatch(/^#2026-\d{6}$/);
       expect(result.totals.grandTotal).toBe(160);
 
-      // TX1 — the row exists as `pending`, with no money and no event yet.
       expect(mockRepository.createOrder).toHaveBeenCalledWith(
         expect.objectContaining({
           userId: USER_ID,
@@ -467,7 +466,6 @@ describe('CheckoutService', () => {
         mockPaymentsService.processPayment.mock.invocationCallOrder[0],
       );
 
-      // TX2 — the confirmation carries the capture and the outbox event.
       expect(mockRepository.confirmOrder).toHaveBeenCalledWith(
         'order-123',
         { transactionId: 'mock_tx_123' },
@@ -565,7 +563,6 @@ describe('CheckoutService', () => {
 
       expect(result.status).toBe('confirmed');
       expect(result.orderId).toBe('order-123');
-      // Same order, same hold, one capture: no new reservation and no new row.
       expect(mockCatalogClient.reserveStock).not.toHaveBeenCalled();
       expect(mockRepository.createOrder).not.toHaveBeenCalled();
       expect(mockPaymentsService.processPayment).toHaveBeenCalledTimes(1);

@@ -16,7 +16,6 @@ export class MockPaymentProvider implements IPaymentProvider {
       };
     }
 
-    // Mock successful authorization & capture
     const transactionId = `mock_tx_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
     return {
       success: true,
