@@ -22,9 +22,6 @@ export interface OrderWithDetails extends OrderRow {
 export class OrdersRepository {
   constructor(private readonly outbox: OrderOutbox) {}
 
-  /**
-   * Loads customer orders with cursor-based pagination.
-   */
   async findCustomerOrders(
     userId: string,
     cursor?: string,
@@ -99,9 +96,6 @@ export class OrdersRepository {
     return res.rows[0] ?? null;
   }
 
-  /**
-   * Loads the status history timeline for a given order.
-   */
   async findStatusHistory(orderId: string): Promise<OrderStatusHistoryRow[]> {
     const UUID_REGEX =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

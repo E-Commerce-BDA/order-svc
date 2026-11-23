@@ -35,11 +35,8 @@ export interface ReservedItem {
 }
 
 export type StockFailure =
-  /** 409 INSUFFICIENT_STOCK / RESERVATION_CLOSED / RESERVATION_CONFLICT */
   | 'insufficient_stock'
-  /** 400/404/422 — the request itself is wrong (contract drift) */
   | 'invalid_request'
-  /** 5xx, network error or timeout */
   | 'unavailable';
 
 export type ReserveStockResult =

@@ -24,7 +24,6 @@ import {
 import { CheckoutDto } from './dto/checkout.dto.js';
 import type { OrderItemRow, OrderRow } from '../db/rows.js';
 
-/** The route segment is part of the key: one key space per endpoint. */
 const IDEMPOTENCY_ROUTE = 'checkout';
 const CACHE_TTL_SECONDS = 86_400;
 const LOCK_TTL_SECONDS = 60;
@@ -596,7 +595,6 @@ export class CheckoutService {
     };
   }
 
-  /** 402 only comes from `capture`, and it always means "this attempt is over". */
   private isDecline(error: unknown): boolean {
     return error instanceof HttpException && error.getStatus() === HttpStatus.PAYMENT_REQUIRED;
   }

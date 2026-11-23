@@ -12,7 +12,6 @@ import type {
 import { OUTBOX_STORE } from '@ecom/messaging/nest';
 import { v7 as uuidv7 } from 'uuid';
 
-/** The two topics order-svc owns. Anything else is a bug, not a caller choice. */
 export type OrderTopic = 'order.created' | 'order.status.updated';
 
 export interface OrderIdentity {

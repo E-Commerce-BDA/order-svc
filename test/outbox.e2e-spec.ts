@@ -62,7 +62,6 @@ const OUTBOX_COLUMNS = `id, event_id, aggregate_type, aggregate_id, event_type,
        payload, envelope, status, attempts, last_error, locked_until,
        created_at, published_at`;
 
-/** All rows written for these aggregates, in publish order. */
 async function orderOutboxRows(
   pool: Pool,
   aggregateIds: string[],
@@ -95,7 +94,6 @@ describe('Order outbox (e2e)', () => {
   const customerId = '018f0000-0000-7000-8000-000000000001';
   const adminId = '018f0000-0000-7000-8000-000000000099';
   const productId = '018f0000-0000-7000-8000-000000000101';
-  /** Every order this suite writes events for; teardown scopes to these. */
   const orderIds: string[] = [];
 
   function trackOrder(id: string): string {
@@ -114,7 +112,6 @@ describe('Order outbox (e2e)', () => {
     stock: 25,
   };
 
-  /** Contract-faithful catalog fake: the checkout saga sends `quantity`. */
   const catalogFake = {
     reserveStock: vi.fn(async (reservationId: string, items: unknown[]) => ({
       ok: true,

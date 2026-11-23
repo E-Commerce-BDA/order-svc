@@ -15,9 +15,7 @@ import type {
   PaymentStatus,
 } from '../db/rows.js';
 
-/** Human-facing order numbers are six digits under a year prefix. */
 const ORDER_NUMBER_PREFIX = '#2026-';
-/** A collision is 1-in-900k; three draws make a repeat practically impossible. */
 const MAX_ORDER_NUMBER_ATTEMPTS = 3;
 const UNIQUE_VIOLATION = '23505';
 const ORDER_NUMBER_CONSTRAINT = 'orders_order_number_key';
@@ -68,7 +66,6 @@ export interface CreateOrderInput {
   historyNote: string;
   actor: string;
   payment: CheckoutPaymentWrite;
-  /** `null` leaves the outbox alone — a pending order has not happened yet. */
   outbox: OutboxWrite | null;
 }
 
@@ -280,7 +277,6 @@ export class CheckoutRepository {
     return `${ORDER_NUMBER_PREFIX}${randomInt(100_000, 999_999)}`;
   }
 
-  /** The unpaid row a resumed attempt should try to capture again. */
   async findPendingPayment(orderId: string): Promise<PaymentRow | null> {
     const { rows } = await getPool().query<PaymentRow>(
       `SELECT * FROM "order".payments

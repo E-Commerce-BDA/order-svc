@@ -6,7 +6,6 @@ const logger = new Logger('DbPool');
 const CONNECTION_TIMEOUT_MS = 5000;
 const QUERY_TIMEOUT_MS = 10000;
 
-/** Postgres `numeric`/`decimal` — the type every money column uses. */
 const NUMERIC_OID = 1700;
 
 /**

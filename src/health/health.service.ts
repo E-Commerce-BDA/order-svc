@@ -12,17 +12,10 @@ export class HealthService {
 
   constructor(private readonly redisService: RedisService) {}
 
-  /**
-   * Liveness: is this process able to answer HTTP?
-   * Performs no external dependency calls.
-   */
   checkLiveness(): { status: 'ok' } {
     return { status: 'ok' };
   }
 
-  /**
-   * Readiness: probes PostgreSQL and Redis.
-   */
   async checkReadiness(): Promise<{
     status: 'ready';
     checks: { db: 'up'; redis: 'up' };

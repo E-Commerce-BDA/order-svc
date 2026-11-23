@@ -16,9 +16,6 @@ export const ALLOWED_STATUS_TRANSITIONS: Record<OrderStatus, readonly OrderStatu
   refunded: [],
 };
 
-/**
- * Checks whether an order can transition from current status to next status.
- */
 export function canTransition(current: OrderStatus, next: OrderStatus): boolean {
   if (current === next) {
     return false;

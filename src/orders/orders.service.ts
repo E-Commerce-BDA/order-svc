@@ -37,9 +37,6 @@ export class OrdersService {
     private readonly paymentsService: PaymentsService,
   ) {}
 
-  /**
-   * Retrieves customer order history with cursor pagination.
-   */
   async findCustomerOrders(
     userId: string,
     query: CustomerOrderQueryDto,
@@ -51,9 +48,6 @@ export class OrdersService {
     );
   }
 
-  /**
-   * Retrieves detailed order by ID with role-based access control.
-   */
   async findOrderById(
     orderId: string,
     currentUser: UserContext,
@@ -71,9 +65,6 @@ export class OrdersService {
     return order;
   }
 
-  /**
-   * Admin order list with filtering, searching, and pagination.
-   */
   async findAdminOrders(query: AdminOrderQueryDto): Promise<{
     data: OrderWithDetails[];
     total: number;
@@ -83,9 +74,6 @@ export class OrdersService {
     return this.ordersRepository.findAdminOrders(query);
   }
 
-  /**
-   * Admin status history timeline retrieval.
-   */
   async findStatusHistory(orderId: string): Promise<OrderStatusHistoryRow[]> {
     const order = await this.ordersRepository.findOrderById(orderId);
     if (!order) {

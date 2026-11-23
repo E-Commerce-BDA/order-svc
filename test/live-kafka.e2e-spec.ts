@@ -67,7 +67,6 @@ describeLive('Live Kafka delivery (e2e)', () => {
     stock: 25,
   };
 
-  /** Contract-faithful catalog fake: the checkout saga sends `quantity`. */
   const catalogFake = {
     reserveStock: vi.fn(async (reservationId: string, items: unknown[]) => ({
       ok: true,
@@ -105,7 +104,6 @@ describeLive('Live Kafka delivery (e2e)', () => {
     payment: { provider: 'mock' },
   });
 
-  /** Drains until this order's `order.created` row is published. */
   async function drainUntilPublished(
     aggregateId: string,
     eventType: 'order.created' | 'order.status.updated',
@@ -128,7 +126,6 @@ describeLive('Live Kafka delivery (e2e)', () => {
     throw new Error(`no published ${eventType} row for ${aggregateId}`);
   }
 
-  /** Checkout against the catalog fake; returns the confirmed order id. */
   async function checkout(): Promise<string> {
     const response = await request(app.getHttpServer())
       .post('/api/v1/checkout')

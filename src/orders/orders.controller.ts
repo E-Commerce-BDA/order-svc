@@ -29,9 +29,6 @@ import type { OrderWithDetails } from './orders.repository.js';
 export class CustomerOrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
-  /**
-   * Customer order history list with cursor-based pagination.
-   */
   @Get()
   @UseGuards(JwtAuthGuard)
   async getMyOrders(
@@ -47,9 +44,6 @@ export class CustomerOrdersController {
 export class OrdersController {
   constructor(private readonly ordersService: OrdersService) {}
 
-  /**
-   * Admin: List all orders with filters, search, and offset pagination.
-   */
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')
@@ -62,9 +56,6 @@ export class OrdersController {
     return this.ordersService.findAdminOrders(query);
   }
 
-  /**
-   * Order details by ID (accessible by customer owner or admin).
-   */
   @Get(':id')
   @UseGuards(JwtAuthGuard)
   async findById(
@@ -77,9 +68,6 @@ export class OrdersController {
     return { order };
   }
 
-  /**
-   * Admin: Order status history timeline.
-   */
   @Get(':id/status-history')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')

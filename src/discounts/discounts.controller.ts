@@ -37,9 +37,6 @@ export class DiscountsController {
     return this.discountsService.validate(dto.code, dto.cartTotal);
   }
 
-  /**
-   * Admin: List discount codes with pagination.
-   */
   @Get()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')
@@ -52,9 +49,6 @@ export class DiscountsController {
     return this.discountsService.findAll(query);
   }
 
-  /**
-   * Admin: Create a new coupon.
-   */
   @Post()
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')
@@ -66,9 +60,6 @@ export class DiscountsController {
     return { code };
   }
 
-  /**
-   * Admin: Get coupon by id.
-   */
   @Get(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')
@@ -77,9 +68,6 @@ export class DiscountsController {
     return { code };
   }
 
-  /**
-   * Admin: Update coupon details.
-   */
   @Patch(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')
@@ -91,9 +79,6 @@ export class DiscountsController {
     return { code };
   }
 
-  /**
-   * Admin: Delete coupon by id.
-   */
   @Delete(':id')
   @UseGuards(JwtAuthGuard, RolesGuard)
   @Roles('admin')

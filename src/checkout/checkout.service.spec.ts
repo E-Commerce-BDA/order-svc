@@ -139,7 +139,6 @@ describe('CheckoutService', () => {
     ...overrides,
   });
 
-  /** Every saga failure is asserted on its status *and* its machine code. */
   const rejection = async (promise: Promise<unknown>): Promise<HttpException> => {
     try {
       await promise;
