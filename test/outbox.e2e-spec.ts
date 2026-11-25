@@ -12,7 +12,7 @@ import {
   type EventEnvelope,
 } from '@ecom/contracts';
 import { OutboxRelay, RecordingPublisher } from '@ecom/messaging';
-import { OUTBOX_PUBLISHER, OUTBOX_RELAY } from '@ecom/messaging/nest';
+import { OUTBOX_PUBLISHER, OUTBOX_RELAY } from '@ecom/messaging/nest/outbox';
 import { vi } from 'vitest';
 import {
   JWT_ALGORITHM,
@@ -329,12 +329,12 @@ describe('Order outbox (e2e)', () => {
       payload: null,
     });
 
+    // contracts 2.0.0 is strict: the 1.x `topic`/`eventType` aliases are gone,
+    // so a dual-write envelope would fail the parse above.
     expect(eventEnvelopeSchema.safeParse(row!.envelope).success).toBe(true);
     expect(row!.envelope).toMatchObject({
       id: row!.event_id,
       type: 'order.created',
-      topic: 'order.created',
-      eventType: 'order.created',
       version: 1,
       producer: 'order-svc',
       idempotencyKey: row!.event_id,

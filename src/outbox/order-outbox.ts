@@ -9,7 +9,9 @@ import type {
   OutboxWriteInput,
   Queryable,
 } from '@ecom/messaging';
-import { OUTBOX_STORE } from '@ecom/messaging/nest';
+// Narrow entry: `@ecom/messaging/nest` also re-exports the SQS task module, whose
+// optional peer this service does not install.
+import { OUTBOX_STORE } from '@ecom/messaging/nest/outbox';
 import { v7 as uuidv7 } from 'uuid';
 
 export type OrderTopic = 'order.created' | 'order.status.updated';

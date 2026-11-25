@@ -9,7 +9,7 @@ import request from 'supertest';
 import { App } from 'supertest/types.js';
 import { vi } from 'vitest';
 import { KafkaEventPublisher, OutboxRelay } from '@ecom/messaging';
-import { OUTBOX_PUBLISHER, OUTBOX_RELAY } from '@ecom/messaging/nest';
+import { OUTBOX_PUBLISHER, OUTBOX_RELAY } from '@ecom/messaging/nest/outbox';
 import {
   JWT_ALGORITHM,
   JWT_AUDIENCE,

@@ -9,11 +9,11 @@ importers:
   .:
     dependencies:
       '@ecom/contracts':
-        specifier: file:..\ecom-contracts\ecom-contracts-1.10.0.tgz
-        version: file:../ecom-contracts/ecom-contracts-1.10.0.tgz(zod@4.6.7)
+        specifier: file:..\ecom-contracts\ecom-contracts-2.0.0.tgz
+        version: file:../ecom-contracts/ecom-contracts-2.0.0.tgz(zod@4.6.7)
       '@ecom/messaging':
-        specifier: file:..\ecom-messaging\ecom-messaging-0.2.0.tgz
-        version: file:../ecom-messaging/ecom-messaging-0.2.0.tgz(@ecom/contracts@file:../ecom-contracts/ecom-contracts-1.10.0.tgz(zod@4.6.7))(@nestjs/common@12.2.0(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2))(kafkajs@2.2.4)
+        specifier: file:..\ecom-messaging\ecom-messaging-0.6.0.tgz
+        version: file:../ecom-messaging/ecom-messaging-0.6.0.tgz(@ecom/contracts@file:../ecom-contracts/ecom-contracts-2.0.0.tgz(zod@4.6.7))(@nestjs/common@12.2.0(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2))(kafkajs@2.2.4)
       '@nestjs/common':
         specifier: ^12.0.1
         version: 12.2.0(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -133,23 +133,29 @@ packages:
     resolution: {integrity: sha512-ooWCrlZP11i8GImSjTHYHLkvFDP48nS4+204nGb1RiX/WXYHmJA2III9/e2DWVabCESdW7hBAEzHRqUn9OUVvQ==}
     engines: {node: '>=0.1.90'}
 
-  '@ecom/contracts@file:../ecom-contracts/ecom-contracts-1.10.0.tgz':
-    resolution: {integrity: sha512-3Ydm0dtoEILJKdffzMP+m5OdgLhcXqh29sm2+yn2Rnu79r57ERd8gQCz88fXxzebkag8Z/jHuOM+79bA6RSqcw==, tarball: file:../ecom-contracts/ecom-contracts-1.10.0.tgz}
-    version: 1.10.0
+  '@ecom/contracts@file:../ecom-contracts/ecom-contracts-2.0.0.tgz':
+    resolution: {integrity: sha512-UGmOJa0pn8Ra0Lbuvm+SBrrS68Dw+OIkHZoz1BvEpgmGPRd2EYdykGLsBSlP/d+qv4ZQ8CO297w2DuDX+czlzA==, tarball: file:../ecom-contracts/ecom-contracts-2.0.0.tgz}
+    version: 2.0.0
     engines: {node: '>=22'}
     peerDependencies:
       zod: '>=4 <5'
 
-  '@ecom/messaging@file:../ecom-messaging/ecom-messaging-0.2.0.tgz':
-    resolution: {integrity: sha512-t40gjRl1uVFLxZPQ6o1bzK7iHWtwXbVBLz5ZAfNEfB0gIV7fnc9xs2K1D09Awtjas9j+yvoPyn+7FV8nHUdH6A==, tarball: file:../ecom-messaging/ecom-messaging-0.2.0.tgz}
-    version: 0.2.0
+  '@ecom/messaging@file:../ecom-messaging/ecom-messaging-0.6.0.tgz':
+    resolution: {integrity: sha512-Vq+4/oMJSlXWDmn82As8KyVM5IEeQESniK++A/2dMYaoSQphWcZsDqaeLoOV1t6xYfWc63zv1aHnhrZRceF2rQ==, tarball: file:../ecom-messaging/ecom-messaging-0.6.0.tgz}
+    version: 0.6.0
     engines: {node: '>=22'}
     peerDependencies:
-      '@ecom/contracts': '>=1.8.0 <2'
+      '@aws-sdk/client-sqs': ^3.1100.0
+      '@ecom/contracts': '>=2.0.0 <3'
       '@nestjs/common': ^12.0.1
+      '@nestjs/microservices': ^12.0.1
       kafkajs: ^2.2.4
     peerDependenciesMeta:
+      '@aws-sdk/client-sqs':
+        optional: true
       '@nestjs/common':
+        optional: true
+      '@nestjs/microservices':
         optional: true
       kafkajs:
         optional: true
@@ -1910,13 +1916,13 @@ snapshots:
   '@colors/colors@1.5.0':
     optional: true
 
-  '@ecom/contracts@file:../ecom-contracts/ecom-contracts-1.10.0.tgz(zod@4.6.7)':
+  '@ecom/contracts@file:../ecom-contracts/ecom-contracts-2.0.0.tgz(zod@4.6.7)':
     dependencies:
       zod: 4.6.7
 
-  '@ecom/messaging@file:../ecom-messaging/ecom-messaging-0.2.0.tgz(@ecom/contracts@file:../ecom-contracts/ecom-contracts-1.10.0.tgz(zod@4.6.7))(@nestjs/common@12.2.0(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2))(kafkajs@2.2.4)':
+  '@ecom/messaging@file:../ecom-messaging/ecom-messaging-0.6.0.tgz(@ecom/contracts@file:../ecom-contracts/ecom-contracts-2.0.0.tgz(zod@4.6.7))(@nestjs/common@12.2.0(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2))(kafkajs@2.2.4)':
     dependencies:
-      '@ecom/contracts': file:../ecom-contracts/ecom-contracts-1.10.0.tgz(zod@4.6.7)
+      '@ecom/contracts': file:../ecom-contracts/ecom-contracts-2.0.0.tgz(zod@4.6.7)
     optionalDependencies:
       '@nestjs/common': 12.2.0(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)
       kafkajs: 2.2.4

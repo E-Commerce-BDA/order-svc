@@ -210,9 +210,10 @@ describe('Order Schema & Fixtures (e2e)', () => {
     const eventId = randomUUID();
     const orderId = '018f0000-0000-7000-8000-000000000010';
 
-    // ord-011: a pending row has to carry the canonical envelope. `payload` is
-    // still there for the rows written before migration 006, and new rows leave
-    // it null.
+    // ord-011: a pending row has to carry the canonical envelope. contracts 2.0.0
+    // requires type/version/idempotencyKey and rejects the 1.x aliases. `payload`
+    // is still there for the rows written before migration 006, and new rows
+    // leave it null.
     await pool.query(
       `INSERT INTO "order".outbox (
         event_id, aggregate_type, aggregate_id, event_type, envelope
@@ -223,6 +224,10 @@ describe('Order Schema & Fixtures (e2e)', () => {
         JSON.stringify({
           id: eventId,
           type: 'order.created',
+          version: 1,
+          timestamp: '2026-10-31T00:00:00.000Z',
+          producer: 'order-svc',
+          idempotencyKey: eventId,
           payload: {
             orderId,
             orderNumber: '#2026-900001',
@@ -262,5 +267,58 @@ describe('Order Schema & Fixtures (e2e)', () => {
         [eventId],
       ),
     ).rejects.toThrow(/outbox_pending_has_envelope/);
+  });
+
+  it('backfills a pending 1.x envelope once, then leaves it alone', async () => {
+    const eventId = randomUUID();
+    const orderId = '018f0000-0000-7000-8000-000000000010';
+    const legacy = {
+      id: eventId,
+      type: 'order.created',
+      topic: 'order.created',
+      eventType: 'order.created',
+      version: 1,
+      timestamp: '2026-10-31T00:00:00.000Z',
+      producer: 'order-svc',
+      idempotencyKey: eventId,
+      payload: { orderId, createdAt: '2026-10-31T00:00:00.000Z' },
+    };
+
+    try {
+      await pool.query(
+        `INSERT INTO "order".outbox (
+           event_id, aggregate_type, aggregate_id, event_type, envelope
+         ) VALUES ($1, 'order', $2, 'order.created', $3::jsonb);`,
+        [eventId, orderId, JSON.stringify(legacy)],
+      );
+
+      const migration = readFileSync(
+        join(__dirname, '../db/007-canonical-envelope-backfill.sql'),
+        'utf-8',
+      );
+      await pool.query(migration);
+
+      const { rows } = await pool.query<{ envelope: Record<string, unknown> }>(
+        `SELECT envelope FROM "order".outbox WHERE event_id = $1;`,
+        [eventId],
+      );
+      expect(rows[0]!.envelope).toMatchObject({
+        id: eventId,
+        type: 'order.created',
+        version: 1,
+        producer: 'order-svc',
+        idempotencyKey: eventId,
+      });
+      expect(rows[0]!.envelope).not.toHaveProperty('topic');
+      expect(rows[0]!.envelope).not.toHaveProperty('eventType');
+
+      await pool.query(migration);
+      const { rows: again } = await pool.query<{
+        envelope: Record<string, unknown>;
+      }>(`SELECT envelope FROM "order".outbox WHERE event_id = $1;`, [eventId]);
+      expect(again[0]!.envelope).toEqual(rows[0]!.envelope);
+    } finally {
+      await pool.query(`DELETE FROM "order".outbox WHERE event_id = $1;`, [eventId]);
+    }
   });
 });
