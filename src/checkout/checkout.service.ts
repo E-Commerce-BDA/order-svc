@@ -23,6 +23,7 @@ import {
 } from './checkout.repository.js';
 import { CheckoutDto } from './dto/checkout.dto.js';
 import type { OrderItemRow, OrderRow } from '../db/rows.js';
+import type { CheckoutItemDto } from './dto/checkout-item.dto.js';
 
 const IDEMPOTENCY_ROUTE = 'checkout';
 const CACHE_TTL_SECONDS = 86_400;
@@ -52,6 +53,14 @@ export interface CheckoutConfirmation {
   status: string;
   totals: CheckoutTotals;
   items: CheckoutItemResponse[];
+}
+
+/** Ids the storefront can match a stock error against its checkout lines. */
+export interface StockShortfallDetails {
+  /** Reservation keys (`variantId ?? productId`), one per short line. */
+  itemIds: string[];
+  /** Both ids per line, so a `productId:variantId` cart key matches exactly. */
+  items: Array<{ productId: string; variantId: string | null }>;
 }
 
 interface CachedResponse {
@@ -189,7 +198,7 @@ export class CheckoutService {
       plannedOrderId,
     );
 
-    if (!reservation.ok) throw this.toStockError(reservation);
+    if (!reservation.ok) throw this.toStockError(reservation, dto.items);
 
     let phase: SagaPhase = 'pricing';
     let orderId: string | null = null;
@@ -749,15 +758,21 @@ export class CheckoutService {
    * A stock failure is not always a 409: a contract drift must surface as a bad
    * gateway (our client is wrong) and a dead catalog as unavailable, so the
    * storefront can retry instead of telling the customer the item is gone.
+   *
+   * The 409 keeps its status and envelope; only `details` grows. Catalog names
+   * the short line in prose but sends no structured ids, so the lines of the
+   * failed request are what the storefront can attribute the error to.
    */
   private toStockError(
     failure: Extract<ReserveStockResult, { ok: false }>,
+    lines: CheckoutItemDto[],
   ): ConflictException | BadGatewayException | ServiceUnavailableException {
     switch (failure.failure) {
       case 'insufficient_stock':
         return new ConflictException({
           code: failure.code ?? 'STOCK_INSUFFICIENT',
           message: failure.message,
+          details: shortfallDetails(lines),
         });
       case 'invalid_request':
         return new BadGatewayException({
@@ -778,4 +793,19 @@ function idempotencyConflict(): ConflictException {
     code: 'IDEMPOTENCY_CONFLICT',
     message: 'x-idempotency-key was already used with a different request payload',
   });
+}
+
+/**
+ * Both id shapes are sent because the two sides key a line differently: catalog
+ * reserves by `variantId ?? productId`, the cart by `productId:variantId`.
+ */
+function shortfallDetails(lines: CheckoutItemDto[]): StockShortfallDetails {
+  const items = lines.map((line) => ({
+    productId: line.productId,
+    variantId: line.variantId ?? null,
+  }));
+  return {
+    itemIds: items.map((item) => item.variantId ?? item.productId),
+    items,
+  };
 }

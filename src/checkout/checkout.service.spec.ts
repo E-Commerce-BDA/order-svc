@@ -414,6 +414,64 @@ describe('CheckoutService', () => {
     });
   });
 
+  describe('stock shortfall attribution (ord-013)', () => {
+    const shortfall = (failure: 'insufficient_stock' | 'invalid_request' | 'unavailable') => ({
+      ok: false as const,
+      failure,
+      code: 'INSUFFICIENT_STOCK',
+      message: 'no stock',
+    });
+
+    it('names every requested line in the 409 details', async () => {
+      const dto = createSampleDto();
+      dto.items.push({
+        productId: '018f0000-0000-7000-8000-000000000102',
+        variantId: '018f0000-0000-7000-8000-000000000202',
+        qty: 1,
+      });
+      mockCatalogClient.reserveStock.mockResolvedValueOnce(shortfall('insufficient_stock'));
+
+      const error = await rejection(service.checkout(USER_ID, KEY, dto));
+      const payload = error.getResponse() as {
+        code: string;
+        details: {
+          itemIds: string[];
+          items: Array<{ productId: string; variantId: string | null }>;
+        };
+      };
+
+      expect(error.getStatus()).toBe(HttpStatus.CONFLICT);
+      expect(payload.code).toBe('INSUFFICIENT_STOCK');
+      expect(payload.details.itemIds).toEqual([
+        '018f0000-0000-7000-8000-000000000101',
+        '018f0000-0000-7000-8000-000000000202',
+      ]);
+      expect(payload.details.items).toEqual([
+        {
+          productId: '018f0000-0000-7000-8000-000000000101',
+          variantId: null,
+        },
+        {
+          productId: '018f0000-0000-7000-8000-000000000102',
+          variantId: '018f0000-0000-7000-8000-000000000202',
+        },
+      ]);
+      expect(mockRepository.createOrder).not.toHaveBeenCalled();
+    });
+
+    it('leaves the non-409 stock failures without line attribution', async () => {
+      mockCatalogClient.reserveStock.mockResolvedValueOnce(shortfall('invalid_request'));
+      const badGateway = await rejection(service.checkout(USER_ID, KEY, createSampleDto()));
+      expect(badGateway.getStatus()).toBe(HttpStatus.BAD_GATEWAY);
+      expect(badGateway.getResponse()).not.toHaveProperty('details');
+
+      mockCatalogClient.reserveStock.mockResolvedValueOnce(shortfall('unavailable'));
+      const unavailable = await rejection(service.checkout(USER_ID, KEY, createSampleDto()));
+      expect(unavailable.getStatus()).toBe(HttpStatus.SERVICE_UNAVAILABLE);
+      expect(unavailable.getResponse()).not.toHaveProperty('details');
+    });
+  });
+
   describe('cart conversion (ord-012)', () => {
     // cart-svc deleted `/internal/carts/:userId/convert` in ca-009, so the old
     // bridge was POSTing to a dead route on every checkout and logging a 404.
