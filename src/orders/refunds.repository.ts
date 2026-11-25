@@ -83,6 +83,28 @@ export class RefundsRepository {
     refundId: string,
     providerReference: string,
   ): Promise<RefundSettlement> {
+    const settled = await this.settle(refundId, providerReference, false);
+    if (!settled) throw new NotFoundException(`Refund ${refundId} not found`);
+    return settled;
+  }
+
+  /**
+   * The sweep's terminal write. If another path settled the refund while the
+   * provider call was in flight, the status-guarded UPDATE returns no row and
+   * this is a no-op — the ledger, not the provider response, decides.
+   */
+  async settlePending(
+    refundId: string,
+    providerReference: string,
+  ): Promise<RefundSettlement | null> {
+    return this.settle(refundId, providerReference, true);
+  }
+
+  private async settle(
+    refundId: string,
+    providerReference: string,
+    onlyPending: boolean,
+  ): Promise<RefundSettlement | null> {
     const client = await getPool().connect();
 
     try {
@@ -92,13 +114,16 @@ export class RefundsRepository {
         `UPDATE "order".refunds
          SET status = 'succeeded', provider_reference = $2, failure_reason = NULL,
              updated_at = now()
-         WHERE id = $1
+         WHERE id = $1 ${onlyPending ? "AND status = 'pending'" : ''}
          RETURNING *;`,
         [refundId, providerReference],
       );
 
       const refund = refundRes.rows[0];
-      if (!refund) throw new NotFoundException(`Refund ${refundId} not found`);
+      if (!refund) {
+        await client.query('ROLLBACK');
+        return null;
+      }
 
       await client.query(
         `UPDATE "order".payments
@@ -162,13 +187,14 @@ export class RefundsRepository {
 
   /**
    * The provider refused or was unreachable: only the ledger row changes, so the
-   * order stays exactly where it was and a retry can reuse this slot.
+   * order stays exactly where it was and a retry can reuse this slot. A row that
+   * already succeeded is never downgraded by a late failure from a retry.
    */
   async markFailed(refundId: string, failureReason: string): Promise<RefundRow> {
     const { rows } = await getPool().query<RefundRow>(
       `UPDATE "order".refunds
        SET status = 'failed', failure_reason = $2, updated_at = now()
-       WHERE id = $1
+       WHERE id = $1 AND status <> 'succeeded'
        RETURNING *;`,
       [refundId, failureReason.slice(0, 500)],
     );

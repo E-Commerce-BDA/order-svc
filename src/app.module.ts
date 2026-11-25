@@ -10,6 +10,7 @@ import { OrdersModule } from './orders/orders.module.js';
 import { PaymentsModule } from './payments/payments.module.js';
 import { OrderOutboxModule } from './outbox/order-outbox.module.js';
 import { InternalModule } from './internal/internal.module.js';
+import { RecoveryModule } from './recovery/recovery.module.js';
 import Joi from 'joi';
 
 @Module({
@@ -25,6 +26,10 @@ import Joi from 'joi';
         CATALOG_SVC_URL: Joi.string().uri().default('http://localhost:4020'),
         KAFKA_BROKERS: Joi.string().default('localhost:9092'),
         DISABLE_OUTBOX_RELAY: Joi.boolean().default(false),
+        DISABLE_RECOVERY_SWEEP: Joi.boolean().default(false),
+        RECOVERY_SWEEP_INTERVAL_MS: Joi.number().default(60_000),
+        RECOVERY_STALE_AFTER_MS: Joi.number().default(300_000),
+        RECOVERY_SWEEP_BATCH_SIZE: Joi.number().default(50),
       }),
     }),
     HealthModule,
@@ -37,6 +42,7 @@ import Joi from 'joi';
     PaymentsModule,
     OrderOutboxModule,
     InternalModule,
+    RecoveryModule,
   ],
   controllers: [],
   providers: [],
